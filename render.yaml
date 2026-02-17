@@ -1,7 +1,7 @@
 services:
   - type: web
     name: kapelke-golf-pool
-    env: node
+    env: python
     plan: free
-    buildCommand: npm install
-    startCommand: node server.js
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
