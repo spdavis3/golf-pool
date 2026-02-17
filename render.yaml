@@ -1,11 +1,7 @@
 services:
   - type: web
     name: kapelke-golf-pool
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python server.py
-    envVars:
-      - key: RENDER
-        value: "true"
-      - key: PYTHON_VERSION
-        value: "3.11.0"
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
