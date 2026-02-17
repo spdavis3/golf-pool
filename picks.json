@@ -1,0 +1,27 @@
+{
+  "entry_fee": 25,
+  "participants": [
+    {
+      "name": "Al",
+      "picks": [
+        "Scottie Scheffler",
+        "Xander Schauffele",
+        "Chris Gotterup",
+        "Hideki Matsuyama",
+        "Sam Burns",
+        "Rory McIlroy"
+      ]
+    },
+    {
+      "name": "Sam",
+      "picks": [
+        "Scottie Scheffler",
+        "Collin Morikawa",
+        "Hideki Matsuyama",
+        "Xander Schauffele",
+        "Tommy Fleetwood",
+        "Jake Knapp"
+      ]
+    }
+  ]
+}
