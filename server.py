@@ -18,8 +18,6 @@ ESPN_EVENT_ID = '401811933'
 ESPN_URL = f'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard/{ESPN_EVENT_ID}'
 ESPN_SCOREBOARD_URL = 'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard'
 OWGR_URL = 'https://apiweb.owgr.com/api/owgr/rankings/getRankings?pageSize=300&pageNumber=1'
-# Tournament start: Feb 19, 2026. Once it starts, no edits allowed.
-TOURNAMENT_START = datetime(2026, 2, 19, 7, 0)  # 7 AM local time
 
 # Cache for the PGA Tour player names (for autocomplete before tournament starts)
 _player_names_cache = []
@@ -28,8 +26,9 @@ _owgr_cache = {}
 
 
 def is_locked():
-    """Returns True if the tournament has started and edits are no longer allowed."""
-    return datetime.now() >= TOURNAMENT_START
+    """Returns True if entries have been manually locked."""
+    data = load_picks()
+    return data.get('locked', False)
 
 
 def fetch_owgr():
@@ -67,9 +66,11 @@ def get_owgr_rank(name):
 def load_picks():
     try:
         with open(PICKS_FILE, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            data.setdefault('locked', False)
+            return data
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"entry_fee": 25, "participants": []}
+        return {"entry_fee": 25, "locked": False, "participants": []}
 
 
 def save_picks(data):
@@ -626,6 +627,38 @@ h1 {
     margin-top: 12px;
     font-style: italic;
 }
+
+.lock-btn {
+    background: #8b2020;
+    color: #e8efe8;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-size: 0.9em;
+    font-weight: 700;
+    font-family: 'Georgia', serif;
+    cursor: pointer;
+    transition: background 0.3s, transform 0.1s;
+}
+
+.lock-btn:hover { background: #b03030; }
+.lock-btn:active { transform: scale(0.96); }
+
+.unlock-btn {
+    background: #5a7020;
+    color: #e8efe8;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-size: 0.9em;
+    font-weight: 700;
+    font-family: 'Georgia', serif;
+    cursor: pointer;
+    transition: background 0.3s, transform 0.1s;
+}
+
+.unlock-btn:hover { background: #738f28; }
+.unlock-btn:active { transform: scale(0.96); }
 """
 
 
@@ -634,6 +667,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
     participants = picks_data.get('participants', [])
     entry_fee = picks_data.get('entry_fee', 25)
     total_pot = len(participants) * entry_fee
+    locked = picks_data.get('locked', False)
 
     # Build set of picked golfer names (lowercase) -> who picked them
     picked_by = {}
@@ -751,7 +785,6 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
         </div>"""
 
     # Participants & picks section
-    locked = is_locked()
     picks_html = ""
     if participants:
         cards = ""
@@ -822,6 +855,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
                     <button class="refresh-btn" onclick="refreshDashboard()">
                         <span class="refresh-icon">&#x21bb;</span> Refresh
                     </button>
+                    {'<button class="unlock-btn" onclick="toggleLock(false)">&#x1F513; Unlock Entries</button>' if locked else '<button class="lock-btn" onclick="toggleLock(true)">&#x1F512; Lock Entries</button>'}
                     <div class="countdown" id="countdown">Auto-refresh in 5:00</div>
                 </div>
             </div>
@@ -856,6 +890,14 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
                 method: 'POST',
                 headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
                 body: 'name=' + encodeURIComponent(name)
+            }}).then(function() {{ location.reload(); }});
+        }}
+
+        function toggleLock(lock) {{
+            var msg = lock ? 'Lock entries? Participants will no longer be able to edit or add picks.' : 'Unlock entries? Participants will be able to edit picks again.';
+            if (!confirm(msg)) return;
+            fetch(lock ? '/api/lock' : '/api/unlock', {{
+                method: 'POST'
             }}).then(function() {{ location.reload(); }});
         }}
 
@@ -1030,6 +1072,10 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
             self._handle_edit_picks()
         elif self.path == '/api/delete':
             self._handle_delete_participant()
+        elif self.path == '/api/lock':
+            self._handle_set_lock(True)
+        elif self.path == '/api/unlock':
+            self._handle_set_lock(False)
         else:
             self.send_response(404)
             self.end_headers()
@@ -1139,6 +1185,12 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
         data['participants'] = [p for p in data['participants'] if p['name'].lower() != name.lower()]
         save_picks(data)
         self._serve_json({'success': True})
+
+    def _handle_set_lock(self, locked):
+        data = load_picks()
+        data['locked'] = locked
+        save_picks(data)
+        self._serve_json({'success': True, 'locked': locked})
 
     def _serve_entry_form_redirect(self, message, error=False):
         _, players = fetch_leaderboard()

@@ -22,6 +22,61 @@
         "Tommy Fleetwood",
         "Jake Knapp"
       ]
+    },
+    {
+      "name": "Pedro",
+      "picks": [
+        "Scottie Scheffler",
+        "Rory McIlroy",
+        "Sepp Straka",
+        "Justin Rose",
+        "Min Woo Lee",
+        "Marco Penge"
+      ]
+    },
+    {
+      "name": "Randy",
+      "picks": [
+        "Scottie Scheffler",
+        "Hideki Matsuyama",
+        "Xander Schauffele",
+        "Patrick Cantlay",
+        "Matt Fitzpatrick",
+        "Harris English"
+      ]
+    },
+    {
+      "name": "Mikee",
+      "picks": [
+        "Matt Fitzpatrick",
+        "Tommy Fleetwood",
+        "Viktor Hovland",
+        "Sahith Theegala",
+        "Kurt Kitayama",
+        "Scottie Scheffler"
+      ]
+    },
+    {
+      "name": "Bob",
+      "picks": [
+        "Collin Morikawa",
+        "Hideki Matsuyama",
+        "Akshay Bhatia",
+        "Ludvig \u00c5berg",
+        "Scottie Scheffler",
+        "Rory McIlroy"
+      ]
+    },
+    {
+      "name": "Chuck",
+      "picks": [
+        "Ryo Hisatsune",
+        "Tommy Fleetwood",
+        "Akshay Bhatia",
+        "Scottie Scheffler",
+        "Sam Burns",
+        "Chris Gotterup"
+      ]
     }
   ]
 }
