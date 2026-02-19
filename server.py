@@ -136,11 +136,22 @@ def fetch_leaderboard():
         players = []
         for c in competitors:
             athlete = c.get('athlete', {})
+
+            # Determine current round and holes completed
+            thru = '-'
+            for ls in c.get('linescores', []):
+                holes = ls.get('linescores', [])
+                if holes:
+                    rnd = ls.get('period', 1)
+                    hole = max(h.get('period', 0) for h in holes)
+                    thru = f'F · R{rnd}' if hole >= 18 else f'Thru {hole} · R{rnd}'
+
             players.append({
                 'name': athlete.get('displayName', 'Unknown'),
                 'position': c.get('order', 999),
                 'score': c.get('score', 'E'),
                 'linescores': [ls.get('displayValue', '-') for ls in c.get('linescores', [])],
+                'thru': thru,
             })
 
         players.sort(key=lambda p: p['position'])
@@ -774,13 +785,14 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
                 <td>{p['position']}</td>
                 <td>{p['name']}{badge}</td>
                 <td class="{score_class}">{p['score']}</td>
+                <td>{p.get('thru', '-')}</td>
                 <td>{rounds}</td>
             </tr>"""
         leaderboard_html = f"""
         <div class="card full-width">
             <h2>Live Leaderboard &mdash; All Picks</h2>
             <table class="lb-table">
-                <thead><tr><th>Pos</th><th>Player</th><th>Score</th><th>Rounds</th></tr></thead>
+                <thead><tr><th>Pos</th><th>Player</th><th>Score</th><th>Thru</th><th>Rounds</th></tr></thead>
                 <tbody>{rows}</tbody>
             </table>
         </div>"""
