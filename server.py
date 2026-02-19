@@ -848,8 +848,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
         <div class="header">
             <div class="header-row">
                 <div>
-                    <h1>Kapelke Golf Pool</h1>
-                    <div class="subtitle">Genesis Invitational 2026 &mdash; Riviera Country Club</div>
+                    <h1>Kapelke Golf Pool &mdash; Genesis Invitational Feb 19&ndash;22, 2026</h1>
                     <div class="updated">Last Updated: {now}</div>
                 </div>
                 <div class="refresh-area">
@@ -953,8 +952,7 @@ def generate_entry_html(message='', error=False, player_names=None):
         <div class="header">
             <div class="header-row">
                 <div>
-                    <h1>Enter Your Picks</h1>
-                    <div class="subtitle">Genesis Invitational 2026</div>
+                    <h1>Enter Your Picks &mdash; Genesis Invitational Feb 19&ndash;22, 2026</h1>
                     <div class="updated">{now}</div>
                 </div>
                 <a href="/" class="back-link">&larr; Back to Dashboard</a>
@@ -1014,8 +1012,7 @@ def generate_edit_html(participant, message='', error=False, player_names=None):
         <div class="header">
             <div class="header-row">
                 <div>
-                    <h1>Edit Picks</h1>
-                    <div class="subtitle">Genesis Invitational 2026</div>
+                    <h1>Edit Picks &mdash; Genesis Invitational Feb 19&ndash;22, 2026</h1>
                     <div class="updated">{now}</div>
                 </div>
                 <a href="/" class="back-link">&larr; Back to Dashboard</a>
