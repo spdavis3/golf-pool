@@ -20,6 +20,7 @@ TOURNAMENT_DATES  = 'Feb 19\u201322, 2026'       # e.g. 'Apr 10\u201313, 2026'
 TOURNAMENT_COURSE = 'Riviera Country Club'        # fallback if ESPN doesn't return it
 ESPN_EVENT_ID     = '401811933'                   # find at: https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard
 ENTRY_FEE         = 25                            # buy-in amount in dollars
+ADMIN_PASSWORD    = 'golf'                        # password to lock/unlock entries
 # =============================================================================
 
 PICKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'picks.json')
@@ -648,37 +649,63 @@ h1 {
     font-style: italic;
 }
 
-.lock-btn {
-    background: #8b2020;
-    color: #e8efe8;
+.open-entry-wrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.open-entry-btn {
+    background: #4a9e5c;
+    color: #0c1a0c;
     border: none;
     border-radius: 8px;
-    padding: 10px 20px;
+    padding: 10px 18px;
     font-size: 0.9em;
     font-weight: 700;
     font-family: 'Georgia', serif;
     cursor: pointer;
-    transition: background 0.3s, transform 0.1s;
+    text-decoration: none;
+    transition: background 0.3s;
 }
 
-.lock-btn:hover { background: #b03030; }
-.lock-btn:active { transform: scale(0.96); }
+.open-entry-btn:hover { background: #5cb86e; }
 
-.unlock-btn {
-    background: #5a7020;
-    color: #e8efe8;
+.lock-icon-btn {
+    background: none;
     border: none;
+    font-size: 1.2em;
+    cursor: pointer;
+    opacity: 0.4;
+    padding: 4px;
+    transition: opacity 0.2s;
+}
+
+.lock-icon-btn:hover { opacity: 0.9; }
+
+.entries-locked-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #5a2020;
+    color: #e8efe8;
+    padding: 8px 14px;
     border-radius: 8px;
-    padding: 10px 20px;
     font-size: 0.9em;
     font-weight: 700;
-    font-family: 'Georgia', serif;
-    cursor: pointer;
-    transition: background 0.3s, transform 0.1s;
 }
 
-.unlock-btn:hover { background: #738f28; }
-.unlock-btn:active { transform: scale(0.96); }
+.unlock-icon-btn {
+    background: none;
+    border: none;
+    font-size: 1em;
+    cursor: pointer;
+    opacity: 0.5;
+    padding: 0;
+    transition: opacity 0.2s;
+}
+
+.unlock-icon-btn:hover { opacity: 1; }
 """
 
 
@@ -873,7 +900,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
                     <button class="refresh-btn" onclick="refreshDashboard()">
                         <span class="refresh-icon">&#x21bb;</span> Refresh
                     </button>
-                    {'<button class="unlock-btn" onclick="toggleLock(false)">&#x1F513; Unlock Entries</button>' if locked else '<button class="lock-btn" onclick="toggleLock(true)">&#x1F512; Lock Entries</button>'}
+                    {'<span class="entries-locked-badge">&#x1F512; Entries Locked <button class="unlock-icon-btn" onclick="toggleLock(false)" title="Unlock entries">&#x1F513;</button></span>' if locked else '<span class="open-entry-wrap"><a href="/enter" class="open-entry-btn">&#x26F3; Open Entry</a><button class="lock-icon-btn" onclick="toggleLock(true)" title="Lock entries">&#x1F512;</button></span>'}
                     <div class="countdown" id="countdown">Auto-refresh in 5:00</div>
                 </div>
             </div>
@@ -887,7 +914,6 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
         {leaderboard_html}
         {picks_html}
 
-        {'<div style="text-align: center; margin-top: 25px;"><a href="/enter" class="entry-link">+ Add Participant</a></div>' if not locked else ''}
     </div>
 
     <script>
@@ -912,11 +938,15 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
         }}
 
         function toggleLock(lock) {{
-            var msg = lock ? 'Lock entries? Participants will no longer be able to edit or add picks.' : 'Unlock entries? Participants will be able to edit picks again.';
-            if (!confirm(msg)) return;
+            var pw = prompt(lock ? 'Enter password to lock entries:' : 'Enter password to unlock entries:');
+            if (pw === null) return;
             fetch(lock ? '/api/lock' : '/api/unlock', {{
-                method: 'POST'
-            }}).then(function() {{ location.reload(); }});
+                method: 'POST',
+                headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                body: 'password=' + encodeURIComponent(pw)
+            }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+                if (data.error) {{ alert(data.error); }} else {{ location.reload(); }}
+            }});
         }}
 
         // Auto-refresh countdown
@@ -1203,6 +1233,13 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
         self._serve_json({'success': True})
 
     def _handle_set_lock(self, locked):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length).decode('utf-8')
+        params = urllib.parse.parse_qs(body)
+        password = params.get('password', [''])[0]
+        if password != ADMIN_PASSWORD:
+            self._serve_json({'error': 'Incorrect password.'})
+            return
         data = load_picks()
         data['locked'] = locked
         save_picks(data)
