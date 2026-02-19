@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Kapelke Golf Pool Dashboard
-Genesis Invitational 2026
 """
 
 import json
@@ -13,8 +12,17 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import webbrowser
 
+# =============================================================================
+# TOURNAMENT CONFIGURATION — update these for each new tournament
+# =============================================================================
+TOURNAMENT_NAME   = 'Genesis Invitational'
+TOURNAMENT_DATES  = 'Feb 19\u201322, 2026'       # e.g. 'Apr 10\u201313, 2026'
+TOURNAMENT_COURSE = 'Riviera Country Club'        # fallback if ESPN doesn't return it
+ESPN_EVENT_ID     = '401811933'                   # find at: https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard
+ENTRY_FEE         = 25                            # buy-in amount in dollars
+# =============================================================================
+
 PICKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'picks.json')
-ESPN_EVENT_ID = '401811933'
 ESPN_URL = f'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard/{ESPN_EVENT_ID}'
 ESPN_SCOREBOARD_URL = 'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard'
 OWGR_URL = 'https://apiweb.owgr.com/api/owgr/rankings/getRankings?pageSize=300&pageNumber=1'
@@ -70,7 +78,7 @@ def load_picks():
             data.setdefault('locked', False)
             return data
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"entry_fee": 25, "locked": False, "participants": []}
+        return {"entry_fee": ENTRY_FEE, "locked": False, "participants": []}
 
 
 def save_picks(data):
@@ -119,10 +127,10 @@ def fetch_leaderboard():
         competitors = competition.get('competitors', [])
 
         tournament = {
-            'name': event.get('name', 'Genesis Invitational'),
+            'name': event.get('name', TOURNAMENT_NAME),
             'date': event.get('date', ''),
             'status': competition.get('status', {}).get('type', {}).get('description', 'Scheduled'),
-            'course': event.get('courses', [{}])[0].get('name', 'Riviera Country Club') if event.get('courses') else 'Riviera Country Club',
+            'course': event.get('courses', [{}])[0].get('name', TOURNAMENT_COURSE) if event.get('courses') else TOURNAMENT_COURSE,
         }
 
         players = []
@@ -140,10 +148,10 @@ def fetch_leaderboard():
     except Exception as e:
         print(f"ESPN API error: {e}")
         return {
-            'name': 'Genesis Invitational',
+            'name': TOURNAMENT_NAME,
             'date': '',
             'status': 'Unable to fetch live data',
-            'course': 'Riviera Country Club',
+            'course': TOURNAMENT_COURSE,
         }, []
 
 
@@ -201,7 +209,7 @@ def calculate_standings(participants, players):
     standings.sort(key=lambda s: s['sort_key'])
 
     # Assign prizes
-    entry_fee = 25
+    entry_fee = ENTRY_FEE
     total_pot = len(participants) * entry_fee
     for i, s in enumerate(standings):
         if i == 0:
@@ -782,7 +790,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
         leaderboard_html = """
         <div class="card full-width">
             <h2>Live Leaderboard</h2>
-            <div class="no-data">Leaderboard data will appear once the tournament begins (Feb 19)</div>
+            <div class="no-data">Leaderboard data will appear once the tournament begins</div>
         </div>"""
 
     # Participants & picks section
@@ -840,7 +848,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
     return f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Kapelke Golf Pool - Genesis Invitational</title>
+    <title>Kapelke Golf Pool - {TOURNAMENT_NAME}</title>
     <style>{STYLES}</style>
 </head>
 <body>
@@ -848,7 +856,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
         <div class="header">
             <div class="header-row">
                 <div>
-                    <h1>Kapelke Golf Pool &mdash; Genesis Invitational Feb 19&ndash;22, 2026</h1>
+                    <h1>Kapelke Golf Pool &mdash; {TOURNAMENT_NAME} {TOURNAMENT_DATES}</h1>
                     <div class="updated">Last Updated: {now}</div>
                 </div>
                 <div class="refresh-area">
@@ -952,7 +960,7 @@ def generate_entry_html(message='', error=False, player_names=None):
         <div class="header">
             <div class="header-row">
                 <div>
-                    <h1>Enter Your Picks &mdash; Genesis Invitational Feb 19&ndash;22, 2026</h1>
+                    <h1>Enter Your Picks &mdash; {TOURNAMENT_NAME} {TOURNAMENT_DATES}</h1>
                     <div class="updated">{now}</div>
                 </div>
                 <a href="/" class="back-link">&larr; Back to Dashboard</a>
@@ -961,7 +969,7 @@ def generate_entry_html(message='', error=False, player_names=None):
 
         <div class="form-container">
             <div class="card" style="margin-top: 20px;">
-                <h2>Participant Entry &mdash; $25 Buy-in</h2>
+                <h2>Participant Entry &mdash; ${ENTRY_FEE} Buy-in</h2>
                 {msg_html}
                 <form method="POST" action="/api/picks">
                     <div class="form-group">
@@ -1012,7 +1020,7 @@ def generate_edit_html(participant, message='', error=False, player_names=None):
         <div class="header">
             <div class="header-row">
                 <div>
-                    <h1>Edit Picks &mdash; Genesis Invitational Feb 19&ndash;22, 2026</h1>
+                    <h1>Edit Picks &mdash; {TOURNAMENT_NAME} {TOURNAMENT_DATES}</h1>
                     <div class="updated">{now}</div>
                 </div>
                 <a href="/" class="back-link">&larr; Back to Dashboard</a>
@@ -1217,7 +1225,7 @@ def main():
     host = '0.0.0.0' if os.environ.get('RENDER') else 'localhost'
     print("=" * 50)
     print("  Kapelke Golf Pool Dashboard")
-    print("  Genesis Invitational 2026")
+    print(f"  {TOURNAMENT_NAME} {TOURNAMENT_DATES}")
     print("=" * 50)
     server = HTTPServer((host, port), GolfPoolHandler)
     url = f'http://{host}:{port}'
