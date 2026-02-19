@@ -17,14 +17,15 @@ import webbrowser
 # =============================================================================
 TOURNAMENT_NAME   = 'Genesis Invitational'
 TOURNAMENT_DATES  = 'Feb 19\u201322, 2026'       # e.g. 'Apr 10\u201313, 2026'
-TOURNAMENT_COURSE = 'Riviera Country Club'        # fallback if ESPN doesn't return it
-ESPN_EVENT_ID     = '401811933'                   # find at: https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard
+TOURNAMENT_COURSE = 'Riviera Country Club'        # fallback if API doesn't return it
+PGA_TOUR_ID       = 'R2026007'                    # find at: https://orchestrator.pgatour.com/graphql (leaderboardCompressedV2)
 ENTRY_FEE         = 25                            # buy-in amount in dollars
 ADMIN_PASSWORD    = 'golf'                        # password to lock/unlock entries
 # =============================================================================
 
 PICKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'picks.json')
-ESPN_URL = f'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard/{ESPN_EVENT_ID}'
+PGA_TOUR_API_URL  = 'https://orchestrator.pgatour.com/graphql'
+PGA_TOUR_API_KEY  = 'da2-gsrx5bibzbb4njvhl7t37wqyl4'
 ESPN_SCOREBOARD_URL = 'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard'
 OWGR_URL = 'https://apiweb.owgr.com/api/owgr/rankings/getRankings?pageSize=300&pageNumber=1'
 
@@ -117,56 +118,69 @@ def fetch_player_names():
 
 
 def fetch_leaderboard():
-    """Fetch live leaderboard from ESPN API."""
+    """Fetch live leaderboard from PGA Tour GraphQL API."""
+    import gzip as _gzip, base64 as _base64
+    query = '{ leaderboardCompressedV2(id: "' + PGA_TOUR_ID + '") { id payload } }'
+    body = json.dumps({'query': query}).encode('utf-8')
     try:
-        req = urllib.request.Request(ESPN_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        req = urllib.request.Request(
+            PGA_TOUR_API_URL,
+            data=body,
+            headers={
+                'Content-Type': 'application/json',
+                'x-api-key': PGA_TOUR_API_KEY,
+                'User-Agent': 'Mozilla/5.0',
+            }
+        )
         response = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(response.read().decode('utf-8'))
-        # Event-specific endpoint returns data at top level; scoreboard returns under 'events'
-        event = data if 'competitions' in data else data.get('events', [{}])[0]
-        competition = event.get('competitions', [{}])[0]
-        competitors = competition.get('competitors', [])
+        resp_data = json.loads(response.read().decode('utf-8'))
+        payload = resp_data['data']['leaderboardCompressedV2']['payload']
+        data = json.loads(_gzip.decompress(_base64.b64decode(payload)))
+
+        courses = [c.get('courseName', '') for c in data.get('courses', [])]
+        course = courses[0] if courses else TOURNAMENT_COURSE
+        status = data.get('roundStatusDisplay', data.get('roundStatus', 'Scheduled'))
+        current_round = 1
 
         tournament = {
-            'name': event.get('name', TOURNAMENT_NAME),
-            'date': event.get('date', ''),
-            'status': competition.get('status', {}).get('type', {}).get('description', 'Scheduled'),
-            'course': event.get('courses', [{}])[0].get('name', TOURNAMENT_COURSE) if event.get('courses') else TOURNAMENT_COURSE,
+            'name': TOURNAMENT_NAME,
+            'date': '',
+            'status': status,
+            'course': course,
         }
 
         players = []
-        current_round = 1
-        for c in competitors:
-            athlete = c.get('athlete', {})
+        for p in data.get('players', []):
+            player_info = p.get('player', {})
+            name = f"{player_info.get('firstName', '')} {player_info.get('lastName', '')}".strip()
+            position_str = p.get('position', '999')
+            try:
+                position = int(position_str.replace('T', '').replace('-', '999'))
+            except (ValueError, AttributeError):
+                position = 999
 
-            # Determine current round, holes completed, and today's score
-            thru = '-'
-            today = '-'
-            rnd = 1
-            for ls in c.get('linescores', []):
-                holes = ls.get('linescores', [])
-                if holes:
-                    rnd = ls.get('period', 1)
-                    hole = max(h.get('period', 0) for h in holes)
-                    thru = 'F' if hole >= 18 else f'Thru {hole}'
-                    today = ls.get('displayValue') or '-'
+            rnd = p.get('currentRound', 1)
             current_round = max(current_round, rnd)
+            thru = p.get('thru', '-') or '-'
+            total = p.get('total', 'E') or 'E'
+            today = p.get('score', '-') or '-'
+            rounds = p.get('rounds', [])
 
             players.append({
-                'name': athlete.get('displayName', 'Unknown'),
-                'position': c.get('order', 999),
-                'score': c.get('score', 'E'),
+                'name': name,
+                'position': position,
+                'score': total,
                 'today': today,
-                'linescores': [ls.get('displayValue', '-') for ls in c.get('linescores', [])],
                 'thru': thru,
+                'linescores': rounds,
             })
 
         tournament['current_round'] = current_round
-
         players.sort(key=lambda p: p['position'])
         return tournament, players
+
     except Exception as e:
-        print(f"ESPN API error: {e}")
+        print(f"PGA Tour API error: {e}")
         return {
             'name': TOURNAMENT_NAME,
             'date': '',
