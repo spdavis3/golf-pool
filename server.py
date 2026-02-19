@@ -748,18 +748,16 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
     leaderboard_html = ""
     if players:
         rows = ""
-        for i, p in enumerate(players[:30]):
+        for i, p in enumerate(players):
             name_lower = p['name'].lower()
-            is_picked = any(name_lower in pk or pk in name_lower for pk in picked_by)
-            picked_class = ' class="picked"' if is_picked else ''
-            badge = ''
-            if is_picked:
-                pickers = []
-                for pk, names in picked_by.items():
-                    if name_lower in pk or pk in name_lower:
-                        pickers.extend(names)
-                badge = f'<span class="picked-badge">{", ".join(pickers)}</span>'
+            pickers = []
+            for pk, names in picked_by.items():
+                if name_lower in pk or pk in name_lower:
+                    pickers.extend(names)
+            if not pickers:
+                continue
 
+            badge = f'<span class="picked-badge">{", ".join(pickers)}</span>'
             score_str = str(p['score'])
             if score_str.startswith('-'):
                 score_class = 'score-under'
@@ -772,7 +770,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
 
             rounds = ' / '.join(p['linescores'][:4]) if p['linescores'] else '-'
             rows += f"""
-            <tr{picked_class}>
+            <tr class="picked">
                 <td>{p['position']}</td>
                 <td>{p['name']}{badge}</td>
                 <td class="{score_class}">{p['score']}</td>
