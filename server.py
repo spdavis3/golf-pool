@@ -214,10 +214,10 @@ def calculate_standings(participants, players):
         standings.append({
             'name': participant['name'],
             'picks': picks_with_pos,
-            'sort_key': [p['position'] if p['unique'] else 999 for p in picks_with_pos],
+            'sort_key': [p['position'] for p in picks_with_pos],
         })
 
-    # Sort standings: compare unique pick positions
+    # Sort standings: best pick wins, cascade to next best on ties
     standings.sort(key=lambda s: s['sort_key'])
 
     # Assign prizes
