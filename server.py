@@ -778,7 +778,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
             </tr>"""
         leaderboard_html = f"""
         <div class="card full-width">
-            <h2>Live Leaderboard</h2>
+            <h2>Live Leaderboard &mdash; All Picks</h2>
             <table class="lb-table">
                 <thead><tr><th>Pos</th><th>Player</th><th>Score</th><th>Rounds</th></tr></thead>
                 <tbody>{rows}</tbody>
