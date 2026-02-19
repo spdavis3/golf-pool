@@ -693,19 +693,13 @@ h1 {
     border-radius: 8px;
     font-size: 0.9em;
     font-weight: 700;
-}
-
-.unlock-icon-btn {
-    background: none;
+    font-family: 'Georgia', serif;
     border: none;
-    font-size: 1em;
     cursor: pointer;
-    opacity: 0.5;
-    padding: 0;
-    transition: opacity 0.2s;
+    transition: background 0.3s;
 }
 
-.unlock-icon-btn:hover { opacity: 1; }
+.entries-locked-badge:hover { background: #7a3030; }
 """
 
 
@@ -900,7 +894,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
                     <button class="refresh-btn" onclick="refreshDashboard()">
                         <span class="refresh-icon">&#x21bb;</span> Refresh
                     </button>
-                    {'<span class="entries-locked-badge">&#x1F512; Entries Locked <button class="unlock-icon-btn" onclick="toggleLock(false)" title="Unlock entries">&#x1F513;</button></span>' if locked else '<span class="open-entry-wrap"><a href="/enter" class="open-entry-btn">&#x26F3; Open Entry</a><button class="lock-icon-btn" onclick="toggleLock(true)" title="Lock entries">&#x1F512;</button></span>'}
+                    {'<button class="entries-locked-badge" onclick="toggleLock(false)" title="Click to unlock">&#x1F512; Entries Locked</button>' if locked else '<span class="open-entry-wrap"><a href="/enter" class="open-entry-btn">&#x26F3; Open Entry</a><button class="lock-icon-btn" onclick="toggleLock(true)" title="Lock entries">&#x1F512;</button></span>'}
                     <div class="countdown" id="countdown">Auto-refresh in 5:00</div>
                 </div>
             </div>
