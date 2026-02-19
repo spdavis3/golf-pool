@@ -888,13 +888,13 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
             <div class="header-row">
                 <div>
                     <h1>Kapelke Golf Pool &mdash; {TOURNAMENT_NAME} {TOURNAMENT_DATES}</h1>
+                    {'<button class="entries-locked-badge" onclick="toggleLock(false)" title="Click to unlock">&#x1F512; Entries Locked</button>' if locked else '<span class="open-entry-wrap"><a href="/enter" class="open-entry-btn">&#x26F3; Open Entry</a><button class="lock-icon-btn" onclick="toggleLock(true)" title="Lock entries">&#x1F512;</button></span>'}
                     <div class="updated">Last Updated: {now}</div>
                 </div>
                 <div class="refresh-area">
                     <button class="refresh-btn" onclick="refreshDashboard()">
                         <span class="refresh-icon">&#x21bb;</span> Refresh
                     </button>
-                    {'<button class="entries-locked-badge" onclick="toggleLock(false)" title="Click to unlock">&#x1F512; Entries Locked</button>' if locked else '<span class="open-entry-wrap"><a href="/enter" class="open-entry-btn">&#x26F3; Open Entry</a><button class="lock-icon-btn" onclick="toggleLock(true)" title="Lock entries">&#x1F512;</button></span>'}
                     <div class="countdown" id="countdown">Auto-refresh in 5:00</div>
                 </div>
             </div>
