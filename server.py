@@ -113,7 +113,8 @@ def fetch_leaderboard():
         req = urllib.request.Request(ESPN_URL, headers={'User-Agent': 'Mozilla/5.0'})
         response = urllib.request.urlopen(req, timeout=10)
         data = json.loads(response.read().decode('utf-8'))
-        event = data.get('events', [{}])[0]
+        # Event-specific endpoint returns data at top level; scoreboard returns under 'events'
+        event = data if 'competitions' in data else data.get('events', [{}])[0]
         competition = event.get('competitions', [{}])[0]
         competitors = competition.get('competitors', [])
 
