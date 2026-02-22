@@ -208,24 +208,35 @@ def calculate_standings(participants, players):
     if not participants or not players:
         return []
 
-    # Build lookup: lowercase player name -> position
+    # Build lookup: lowercase player name -> position and cut status
     pos_lookup = {}
+    cut_lookup = {}
     for p in players:
-        pos_lookup[p['name'].lower()] = p['position']
-        # Also store short versions for fuzzy matching
+        key = p['name'].lower()
+        pos_lookup[key] = p['position']
+        cut_lookup[key] = p.get('cut', False)
         parts = p['name'].lower().split()
         if len(parts) >= 2:
             pos_lookup[parts[-1]] = pos_lookup.get(parts[-1], p['position'])
+            cut_lookup[parts[-1]] = cut_lookup.get(parts[-1], p.get('cut', False))
 
     def get_position(pick_name):
         name = pick_name.lower().strip()
         if name in pos_lookup:
             return pos_lookup[name]
-        # Fuzzy: check if pick is a substring of any player name
         for pname, pos in pos_lookup.items():
             if name in pname or pname in name:
                 return pos
         return 999
+
+    def is_cut(pick_name):
+        name = pick_name.lower().strip()
+        if name in cut_lookup:
+            return cut_lookup[name]
+        for pname, val in cut_lookup.items():
+            if name in pname or pname in name:
+                return val
+        return False
 
     # Count how many times each golfer was picked
     pick_counts = {}
@@ -244,6 +255,7 @@ def calculate_standings(participants, players):
                 'name': pick,
                 'position': pos,
                 'unique': unique,
+                'cut': is_cut(pick),
             })
         # Sort by position (best first)
         picks_with_pos.sort(key=lambda x: x['position'])
@@ -798,7 +810,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
             best_picks = []
             for pk in s['picks'][:3]:
                 css = 'pick-unique' if pk['unique'] else 'pick-shared'
-                pos_str = f"T{pk['position']}" if pk['position'] < 999 else '-'
+                pos_str = 'CUT' if pk.get('cut') else (f"T{pk['position']}" if pk['position'] < 999 else '-')
                 best_picks.append(f'<span class="{css}">{pk["name"]}<span class="pick-pos">({pos_str})</span></span>')
             prize_str = f'<span class="prize">${s["prize"]}</span>' if s['prize'] > 0 else '-'
             rows += f"""
@@ -893,7 +905,10 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
                 tourn_pos = '-'
                 for pl in players:
                     if pick.lower().strip() in pl['name'].lower() or pl['name'].lower() in pick.lower().strip():
-                        tourn_pos = f"T{pl['position']}"
+                        if pl.get('cut'):
+                            tourn_pos = 'CUT'
+                        else:
+                            tourn_pos = f"T{pl['position']}"
                         break
                 pick_data.append({
                     'name': pick,
