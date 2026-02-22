@@ -150,14 +150,26 @@ def fetch_leaderboard():
         }
 
         players = []
+        cut_indicators = {'cut', 'mc', 'wd', 'dq', 'mdf', 'dns', 'dqf'}
         for p in data.get('players', []):
             player_info = p.get('player', {})
-            name = f"{player_info.get('firstName', '')} {player_info.get('lastName', '')}".strip()
-            position_str = p.get('position', '999')
-            try:
-                position = int(position_str.replace('T', '').replace('-', '999'))
-            except (ValueError, AttributeError):
-                position = 999
+            name = f"{player_info.get('firstName') or ''} {player_info.get('lastName') or ''}".strip()
+            if not name:
+                continue
+
+            position_str = str(p.get('position', '999') or '999')
+            player_status = str(p.get('status', '') or '').lower()
+            is_cut = position_str.lower() in cut_indicators or player_status in cut_indicators
+
+            if not is_cut:
+                try:
+                    position = int(position_str.replace('T', '').strip())
+                    if position <= 0:
+                        position = 999
+                except (ValueError, AttributeError, TypeError):
+                    position = 999
+                if position == 999:
+                    continue
 
             rnd = p.get('currentRound', 1)
             current_round = max(current_round, rnd)
@@ -168,15 +180,16 @@ def fetch_leaderboard():
 
             players.append({
                 'name': name,
-                'position': position,
+                'position': 999 if is_cut else position,
                 'score': total,
                 'today': today,
                 'thru': thru,
                 'linescores': rounds,
+                'cut': is_cut,
             })
 
         tournament['current_round'] = current_round
-        players.sort(key=lambda p: p['position'])
+        players.sort(key=lambda p: (1 if p.get('cut') else 0, p['position']))
         return tournament, players
 
     except Exception as e:
@@ -470,6 +483,17 @@ h1 {
     border-radius: 4px;
     font-size: 0.75em;
     margin-left: 8px;
+}
+
+.lb-table tr.picked-cut { opacity: 0.5; }
+
+.cut-badge {
+    background: #5a2020;
+    color: #e8efe8;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    font-weight: bold;
 }
 
 /* Participants grid */
@@ -813,20 +837,29 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
                 continue
 
             badge = f'<span class="picked-badge">{", ".join(pickers)}</span>'
-            score_str = str(p['score'])
-            if score_str.startswith('-'):
-                score_class = 'score-under'
-            elif score_str in ('E', '0', 'E '):
+            is_cut = p.get('cut', False)
+            if is_cut:
+                pos_display = '<span class="cut-badge">CUT</span>'
+                row_class = 'picked picked-cut'
                 score_class = 'score-even'
-            elif score_str.startswith('+'):
-                score_class = 'score-over'
+                total_today = p['score']
             else:
-                score_class = 'score-even'
+                pos_display = str(p['position'])
+                row_class = 'picked'
+                score_str = str(p['score'])
+                if score_str.startswith('-'):
+                    score_class = 'score-under'
+                elif score_str in ('E', '0', 'E '):
+                    score_class = 'score-even'
+                elif score_str.startswith('+'):
+                    score_class = 'score-over'
+                else:
+                    score_class = 'score-even'
+                total_today = f'{p["score"]} / {p.get("today", "-")}'
 
-            total_today = f'{p["score"]} / {p.get("today", "-")}'
             rows += f"""
-            <tr class="picked">
-                <td>{p['position']}</td>
+            <tr class="{row_class}">
+                <td>{pos_display}</td>
                 <td>{p['name']}{badge}</td>
                 <td>{p.get('thru', '-')}</td>
                 <td class="{score_class}">{total_today}</td>
