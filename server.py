@@ -50,6 +50,14 @@ def save_history(data):
     with open(HISTORY_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
+def _all_historical_names():
+    """Return sorted list of all unique participant names from history."""
+    names = set()
+    for t in load_history():
+        for r in t.get('results', []):
+            names.add(r['name'])
+    return sorted(names)
+
 def career_standings():
     """Aggregate history.json into per-person career totals."""
     totals = {}
@@ -943,6 +951,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
         </div>"""
 
     # Participants & picks section
+    career_lookup = {c['name'].lower(): c for c in (career or [])}
     picks_html = ""
     if participants:
         cards = ""
@@ -985,9 +994,13 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
                     <a href="/edit/{encoded_name}" class="btn-edit">Edit Picks</a>
                     <button class="btn-delete" onclick="deleteParticipant('{p['name']}')">Delete</button>
                 </div>"""
+            c_data = career_lookup.get(p['name'].lower())
+            career_badge = ''
+            if c_data and c_data['winnings'] > 0:
+                career_badge = f'<span style="font-size:0.75em;color:#e8d44d;font-weight:700;margin-left:8px">Career: ${c_data["winnings"]}</span>'
             cards += f"""
             <div class="participant-card">
-                <div class="participant-name">{p['name']}</div>
+                <div class="participant-name">{p['name']}{career_badge}</div>
                 {pick_items}
                 {actions}
             </div>"""
@@ -1116,14 +1129,21 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
 </html>"""
 
 
-def generate_entry_html(message='', error=False, player_names=None):
+def generate_entry_html(message='', error=False, player_names=None, past_names=None):
+    cfg = load_tournament()
     now = datetime.now().strftime('%B %d, %Y at %I:%M %p')
 
-    # Build datalist options from player names
+    # Build datalist options from golfer names
     datalist_options = ''
     if player_names:
         for name in sorted(player_names):
             datalist_options += f'<option value="{name}">'
+
+    # Build datalist options from past participants
+    past_options = ''
+    if past_names:
+        for name in sorted(past_names):
+            past_options += f'<option value="{name}">'
 
     msg_html = ''
     if message:
@@ -1149,7 +1169,7 @@ def generate_entry_html(message='', error=False, player_names=None):
         <div class="header">
             <div class="header-row">
                 <div>
-                    <h1>Enter Your Picks &mdash; {TOURNAMENT_NAME} {TOURNAMENT_DATES}</h1>
+                    <h1>Enter Your Picks &mdash; {cfg['name']} {cfg['dates']}</h1>
                     <div class="updated">{now}</div>
                 </div>
                 <a href="/" class="back-link">&larr; Back to Dashboard</a>
@@ -1158,16 +1178,17 @@ def generate_entry_html(message='', error=False, player_names=None):
 
         <div class="form-container">
             <div class="card" style="margin-top: 20px;">
-                <h2>Participant Entry &mdash; ${ENTRY_FEE} Buy-in</h2>
+                <h2>Participant Entry &mdash; ${cfg['entry_fee']} Buy-in</h2>
                 {msg_html}
                 <form method="POST" action="/api/picks">
                     <div class="form-group">
                         <label>Your Name</label>
-                        <input type="text" name="name" placeholder="Enter your name" required>
+                        <input type="text" name="name" placeholder="Select or type your name" list="participants" required>
                     </div>
                     {pick_fields}
                     <button type="submit" class="submit-btn">Submit Picks</button>
                 </form>
+                <datalist id="participants">{past_options}</datalist>
                 <datalist id="golfers">{datalist_options}</datalist>
             </div>
         </div>
@@ -1294,7 +1315,8 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
         # Use leaderboard players if tournament is live, otherwise fetch PGA names
         _, players = fetch_leaderboard()
         player_names = [p['name'] for p in players] if players else fetch_player_names()
-        html = generate_entry_html(message=message, error=error, player_names=player_names)
+        past_names = _all_historical_names()
+        html = generate_entry_html(message=message, error=error, player_names=player_names, past_names=past_names)
         self._send_html(html)
 
     def _handle_submit_picks(self):
@@ -1565,7 +1587,8 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
     def _serve_entry_form_redirect(self, message, error=False):
         _, players = fetch_leaderboard()
         player_names = [p['name'] for p in players] if players else fetch_player_names()
-        html = generate_entry_html(message=message, error=error, player_names=player_names)
+        past_names = _all_historical_names()
+        html = generate_entry_html(message=message, error=error, player_names=player_names, past_names=past_names)
         self._send_html(html)
 
     def _send_html(self, html):
