@@ -802,11 +802,18 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
     """
 
     # Pool standings section
+    is_official = tournament.get('status', '').lower() in ('official', 'final', 'complete', 'completed')
     standings_html = ""
     if standings:
         rows = ""
         for s in standings:
             place_class = 'place-1' if s['place'] == '1st' else ('place-2' if s['place'] == '2nd' else '')
+            if is_official and s['place'] == '1st':
+                place_display = '🥇'
+            elif is_official and s['place'] == '2nd':
+                place_display = '🥈'
+            else:
+                place_display = s['place']
             best_picks = []
             for pk in s['picks'][:3]:
                 css = 'pick-unique' if pk['unique'] else 'pick-shared'
@@ -815,7 +822,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
             prize_str = f'<span class="prize">${s["prize"]}</span>' if s['prize'] > 0 else '-'
             rows += f"""
             <tr>
-                <td class="{place_class}">{s['place']}</td>
+                <td class="{place_class}" style="font-size:{'1.4em' if is_official and s['place'] in ('1st','2nd') else '1em'}">{place_display}</td>
                 <td>{s['name']}</td>
                 <td>{' &middot; '.join(best_picks)}</td>
                 <td>{prize_str}</td>
