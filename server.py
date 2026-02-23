@@ -12,18 +12,57 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import webbrowser
 
-# =============================================================================
-# TOURNAMENT CONFIGURATION — update these for each new tournament
-# =============================================================================
-TOURNAMENT_NAME   = 'Genesis Invitational'
-TOURNAMENT_DATES  = 'Feb 19\u201322, 2026'       # e.g. 'Apr 10\u201313, 2026'
-TOURNAMENT_COURSE = 'Riviera Country Club'        # fallback if API doesn't return it
-PGA_TOUR_ID       = 'R2026007'                    # find at: https://orchestrator.pgatour.com/graphql (leaderboardCompressedV2)
-ENTRY_FEE         = 25                            # buy-in amount in dollars
-ADMIN_PASSWORD    = 'golf'                        # password to lock/unlock entries
-# =============================================================================
+PICKS_FILE       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'picks.json')
+TOURNAMENT_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tournament.json')
+HISTORY_FILE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'history.json')
 
-PICKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'picks.json')
+_DEFAULT_TOURNAMENT = {
+    'name': 'Kapelke Golf Pool',
+    'dates': '',
+    'course': '',
+    'pga_tour_id': '',
+    'entry_fee': 25,
+    'admin_password': 'golf',
+}
+
+def load_tournament():
+    try:
+        with open(TOURNAMENT_FILE) as f:
+            cfg = json.load(f)
+            for k, v in _DEFAULT_TOURNAMENT.items():
+                cfg.setdefault(k, v)
+            return cfg
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(_DEFAULT_TOURNAMENT)
+
+def save_tournament(cfg):
+    with open(TOURNAMENT_FILE, 'w') as f:
+        json.dump(cfg, f, indent=2)
+
+def load_history():
+    try:
+        with open(HISTORY_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_history(data):
+    with open(HISTORY_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def career_standings():
+    """Aggregate history.json into per-person career totals."""
+    totals = {}
+    for t in load_history():
+        for r in t.get('results', []):
+            n = r['name']
+            if n not in totals:
+                totals[n] = {'name': n, 'tournaments': 0, 'wins': 0, 'seconds': 0, 'winnings': 0}
+            totals[n]['tournaments'] += 1
+            totals[n]['winnings']    += r.get('prize', 0)
+            if r['place'] == '1st': totals[n]['wins']    += 1
+            if r['place'] == '2nd': totals[n]['seconds'] += 1
+    return sorted(totals.values(), key=lambda x: -x['winnings'])
 PGA_TOUR_API_URL  = 'https://orchestrator.pgatour.com/graphql'
 PGA_TOUR_API_KEY  = 'da2-gsrx5bibzbb4njvhl7t37wqyl4'
 ESPN_SCOREBOARD_URL = 'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard'
@@ -80,7 +119,7 @@ def load_picks():
             data.setdefault('locked', False)
             return data
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"entry_fee": ENTRY_FEE, "locked": False, "participants": []}
+        return {"entry_fee": load_tournament()['entry_fee'], "locked": False, "participants": []}
 
 
 def save_picks(data):
@@ -120,7 +159,8 @@ def fetch_player_names():
 def fetch_leaderboard():
     """Fetch live leaderboard from PGA Tour GraphQL API."""
     import gzip as _gzip, base64 as _base64
-    query = '{ leaderboardCompressedV2(id: "' + PGA_TOUR_ID + '") { id payload } }'
+    cfg = load_tournament()
+    query = '{ leaderboardCompressedV2(id: "' + cfg['pga_tour_id'] + '") { id payload } }'
     body = json.dumps({'query': query}).encode('utf-8')
     try:
         req = urllib.request.Request(
@@ -138,12 +178,12 @@ def fetch_leaderboard():
         data = json.loads(_gzip.decompress(_base64.b64decode(payload)))
 
         courses = [c.get('courseName', '') for c in data.get('courses', [])]
-        course = courses[0] if courses else TOURNAMENT_COURSE
+        course = courses[0] if courses else cfg['course']
         status = data.get('roundStatusDisplay', data.get('roundStatus', 'Scheduled'))
         current_round = 1
 
         tournament = {
-            'name': TOURNAMENT_NAME,
+            'name': cfg['name'],
             'date': '',
             'status': status,
             'course': course,
@@ -194,11 +234,12 @@ def fetch_leaderboard():
 
     except Exception as e:
         print(f"PGA Tour API error: {e}")
+        cfg = load_tournament()
         return {
-            'name': TOURNAMENT_NAME,
+            'name': cfg['name'],
             'date': '',
             'status': 'Unable to fetch live data',
-            'course': TOURNAMENT_COURSE,
+            'course': cfg['course'],
             'current_round': 1,
         }, []
 
@@ -269,7 +310,7 @@ def calculate_standings(participants, players):
     standings.sort(key=lambda s: s['sort_key'])
 
     # Assign prizes
-    entry_fee = ENTRY_FEE
+    entry_fee = load_tournament()['entry_fee']
     total_pot = len(participants) * entry_fee
     for i, s in enumerate(standings):
         if i == 0:
@@ -762,10 +803,12 @@ h1 {
 """
 
 
-def generate_dashboard_html(tournament, players, picks_data, standings):
+def generate_dashboard_html(tournament, players, picks_data, standings, career=None, cfg=None):
+    if cfg is None:
+        cfg = load_tournament()
     now = datetime.now().strftime('%B %d, %Y at %I:%M %p')
     participants = picks_data.get('participants', [])
-    entry_fee = picks_data.get('entry_fee', 25)
+    entry_fee = picks_data.get('entry_fee', cfg['entry_fee'])
     total_pot = len(participants) * entry_fee
     locked = picks_data.get('locked', False)
 
@@ -954,10 +997,39 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
             <div class="participants-grid">{cards}</div>
         </div>"""
 
+    # Career standings card
+    career_html = ''
+    career = career or []
+    if career:
+        top = career[0]['name']
+        crow = ''
+        for c in career:
+            highlight = ' style="background:rgba(232,212,77,0.07)"' if c['name'] == top else ''
+            crow += f"""
+            <tr{highlight}>
+                <td>{c['name']}</td>
+                <td style="text-align:center">{c['tournaments']}</td>
+                <td style="text-align:center">{'🥇 ' * c['wins'] if c['wins'] else '—'}</td>
+                <td style="text-align:center">{'🥈 ' * c['seconds'] if c['seconds'] else '—'}</td>
+                <td style="text-align:right;color:#e8d44d;font-weight:700">${c['winnings']}</td>
+            </tr>"""
+        career_html = f"""
+        <div class="card full-width">
+            <h2>Career Standings</h2>
+            <table class="standings-table">
+                <thead><tr>
+                    <th>Name</th><th style="text-align:center">Tournaments</th>
+                    <th style="text-align:center">Wins</th><th style="text-align:center">2nds</th>
+                    <th style="text-align:right">Total Winnings</th>
+                </tr></thead>
+                <tbody>{crow}</tbody>
+            </table>
+        </div>"""
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Kapelke Golf Pool - {TOURNAMENT_NAME}</title>
+    <title>Kapelke Golf Pool - {cfg['name']}</title>
     <style>{STYLES}</style>
 </head>
 <body>
@@ -965,7 +1037,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
         <div class="header">
             <div class="header-row">
                 <div>
-                    <h1>Kapelke Golf Pool &mdash; {TOURNAMENT_NAME} {TOURNAMENT_DATES}</h1>
+                    <h1>Kapelke Golf Pool &mdash; {cfg['name']} {cfg['dates']}</h1>
                     {'<button class="entries-locked-badge" onclick="toggleLock(false)" title="Click to unlock">&#x1F512; Entries Locked</button>' if locked else '<span class="open-entry-wrap"><a href="/enter" class="open-entry-btn">&#x26F3; Open Entry</a><button class="lock-icon-btn" onclick="toggleLock(true)" title="Lock entries">&#x1F512;</button></span>'}
                     <div class="updated">Last Updated: {now}</div>
                 </div>
@@ -985,6 +1057,11 @@ def generate_dashboard_html(tournament, players, picks_data, standings):
         {standings_html}
         {leaderboard_html}
         {picks_html}
+        {career_html}
+
+        <div style="text-align:center;margin-top:10px;padding-bottom:20px">
+            <a href="/admin" style="color:#4a7a5a;font-size:0.8em;text-decoration:none;font-style:italic">⚙ Admin</a>
+        </div>
 
     </div>
 
@@ -1179,6 +1256,8 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
         elif self.path == '/api/leaderboard':
             tournament, players = fetch_leaderboard()
             self._serve_json({'tournament': tournament, 'players': players})
+        elif self.path.startswith('/admin'):
+            self._serve_admin(self.path)
         else:
             self.send_response(404)
             self.end_headers()
@@ -1194,15 +1273,21 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
             self._handle_set_lock(True)
         elif self.path == '/api/unlock':
             self._handle_set_lock(False)
+        elif self.path == '/admin/update':
+            self._handle_admin_update()
+        elif self.path == '/admin/reset':
+            self._handle_admin_reset()
         else:
             self.send_response(404)
             self.end_headers()
 
     def _serve_dashboard(self):
+        cfg = load_tournament()
         tournament, players = fetch_leaderboard()
         picks_data = load_picks()
         standings = calculate_standings(picks_data.get('participants', []), players)
-        html = generate_dashboard_html(tournament, players, picks_data, standings)
+        career = career_standings()
+        html = generate_dashboard_html(tournament, players, picks_data, standings, career=career, cfg=cfg)
         self._send_html(html)
 
     def _serve_entry_form(self, message='', error=False):
@@ -1309,13 +1394,173 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length).decode('utf-8')
         params = urllib.parse.parse_qs(body)
         password = params.get('password', [''])[0]
-        if password != ADMIN_PASSWORD:
+        if password != load_tournament()['admin_password']:
             self._serve_json({'error': 'Incorrect password.'})
             return
         data = load_picks()
         data['locked'] = locked
         save_picks(data)
         self._serve_json({'success': True, 'locked': locked})
+
+    def _serve_admin(self, path=''):
+        cfg = load_tournament()
+        picks_data = load_picks()
+        participants = picks_data.get('participants', [])
+        locked = picks_data.get('locked', False)
+        entry_fee = cfg['entry_fee']
+        total_pot = len(participants) * entry_fee
+
+        # Parse query string for status messages
+        msg = ''
+        if '?success=updated' in path:
+            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Tournament settings updated.</div>'
+        elif '?success=reset' in path:
+            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Tournament archived and reset. Picks cleared.</div>'
+        elif '?error=badpass' in path:
+            msg = '<div style="background:#4a1a1a;border:1px solid #9e4a4a;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#bf8a8a">✗ Incorrect password.</div>'
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin — Kapelke Golf Pool</title>
+    <style>
+        * {{ margin:0; padding:0; box-sizing:border-box; }}
+        body {{ font-family:'Georgia','Times New Roman',serif; background:#0c1a0c; color:#e8efe8; padding:30px 20px; }}
+        .container {{ max-width:680px; margin:0 auto; }}
+        h1 {{ color:#e8d44d; font-size:1.8em; margin-bottom:6px; }}
+        .back {{ color:#4a9e5c; font-size:0.9em; text-decoration:none; display:inline-block; margin-bottom:24px; }}
+        .back:hover {{ text-decoration:underline; }}
+        .card {{ background:#1a3320; border:1px solid #2d5a38; border-radius:12px; padding:24px; margin-bottom:24px; }}
+        .card h2 {{ color:#e8d44d; font-size:1.1em; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid #4a9e5c; }}
+        label {{ display:block; font-size:0.9em; color:#8abf8a; margin-bottom:5px; margin-top:14px; }}
+        label:first-of-type {{ margin-top:0; }}
+        input[type=text], input[type=number], input[type=password] {{
+            width:100%; padding:10px 12px; background:#0f2615; border:1px solid #2d5a38;
+            border-radius:8px; color:#e8efe8; font-family:'Georgia',serif; font-size:0.95em;
+        }}
+        input:focus {{ outline:none; border-color:#4a9e5c; }}
+        .btn {{ display:inline-block; padding:10px 22px; border:none; border-radius:8px;
+                font-family:'Georgia',serif; font-size:0.95em; font-weight:700; cursor:pointer; }}
+        .btn-green {{ background:#4a9e5c; color:#0c1a0c; margin-top:18px; }}
+        .btn-green:hover {{ background:#5cb86e; }}
+        .btn-red {{ background:#7a2020; color:#e8efe8; margin-top:18px; }}
+        .btn-red:hover {{ background:#9e3030; }}
+        .status-row {{ display:flex; justify-content:space-between; padding:8px 0;
+                       border-bottom:1px solid #2d5a38; font-size:0.9em; }}
+        .status-row:last-child {{ border:none; }}
+        .warn {{ background:#2a1a0a; border:1px solid #7a4a1a; border-radius:8px;
+                 padding:12px 16px; font-size:0.85em; color:#c8a06a; margin-bottom:14px; line-height:1.5; }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>⚙ Admin</h1>
+    <a href="/" class="back">← Back to Dashboard</a>
+    {msg}
+
+    <!-- Tournament Settings -->
+    <div class="card">
+        <h2>Tournament Settings</h2>
+        <form method="POST" action="/admin/update">
+            <label>Tournament Name</label>
+            <input type="text" name="name" value="{cfg['name']}" required>
+            <label>Dates (e.g. Apr 10–13, 2026)</label>
+            <input type="text" name="dates" value="{cfg['dates']}">
+            <label>Course (fallback if API doesn't return it)</label>
+            <input type="text" name="course" value="{cfg['course']}">
+            <label>PGA Tour ID (e.g. R2026007)</label>
+            <input type="text" name="pga_tour_id" value="{cfg['pga_tour_id']}">
+            <label>Entry Fee ($)</label>
+            <input type="number" name="entry_fee" value="{cfg['entry_fee']}" min="1" required>
+            <label>New Admin Password (leave blank to keep current)</label>
+            <input type="password" name="new_password" placeholder="Leave blank to keep current">
+            <label>Current Password (required)</label>
+            <input type="password" name="password" required>
+            <button type="submit" class="btn btn-green">Save Settings</button>
+        </form>
+    </div>
+
+    <!-- Current Status -->
+    <div class="card">
+        <h2>Current Tournament Status</h2>
+        <div class="status-row"><span>Participants</span><span>{len(participants)}</span></div>
+        <div class="status-row"><span>Prize Pool</span><span style="color:#e8d44d">${total_pot}</span></div>
+        <div class="status-row"><span>Entries</span><span>{'🔒 Locked' if locked else '🟢 Open'}</span></div>
+        <div class="status-row"><span>Tournaments in history</span><span>{len(load_history())}</span></div>
+    </div>
+
+    <!-- Archive & Reset -->
+    <div class="card">
+        <h2>Archive &amp; Reset for New Tournament</h2>
+        <div class="warn">
+            ⚠ This will save the current standings to career history, clear all picks,
+            and unlock entries. Use this when a tournament ends and you're ready to start a new one.
+            This cannot be undone.
+        </div>
+        <form method="POST" action="/admin/reset" onsubmit="return confirm('Archive results and reset picks for new tournament?')">
+            <label>Current Password (required)</label>
+            <input type="password" name="password" required>
+            <button type="submit" class="btn btn-red">Archive &amp; Reset</button>
+        </form>
+    </div>
+</div>
+</body>
+</html>"""
+        self._send_html(html)
+
+    def _handle_admin_update(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length).decode('utf-8')
+        params = urllib.parse.parse_qs(body)
+        password = params.get('password', [''])[0]
+        cfg = load_tournament()
+        if password != cfg['admin_password']:
+            self.send_response(303)
+            self.send_header('Location', '/admin?error=badpass')
+            self.end_headers()
+            return
+        cfg['name']         = params.get('name',         [cfg['name']])[0].strip()
+        cfg['dates']        = params.get('dates',        [cfg['dates']])[0].strip()
+        cfg['course']       = params.get('course',       [cfg['course']])[0].strip()
+        cfg['pga_tour_id']  = params.get('pga_tour_id',  [cfg['pga_tour_id']])[0].strip()
+        cfg['entry_fee']    = int(params.get('entry_fee', [cfg['entry_fee']])[0])
+        new_pw = params.get('new_password', [''])[0].strip()
+        if new_pw:
+            cfg['admin_password'] = new_pw
+        save_tournament(cfg)
+        self.send_response(303)
+        self.send_header('Location', '/admin?success=updated')
+        self.end_headers()
+
+    def _handle_admin_reset(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length).decode('utf-8')
+        params = urllib.parse.parse_qs(body)
+        password = params.get('password', [''])[0]
+        cfg = load_tournament()
+        if password != cfg['admin_password']:
+            self.send_response(303)
+            self.send_header('Location', '/admin?error=badpass')
+            self.end_headers()
+            return
+        # Archive current standings
+        picks_data = load_picks()
+        tournament, players = fetch_leaderboard()
+        standings = calculate_standings(picks_data.get('participants', []), players)
+        history = load_history()
+        history.append({
+            'tournament': cfg['name'],
+            'dates':      cfg['dates'],
+            'year':       datetime.now().year,
+            'results':    [{'name': s['name'], 'place': s['place'], 'prize': s['prize']}
+                           for s in standings],
+        })
+        save_history(history)
+        # Reset picks
+        save_picks({'entry_fee': cfg['entry_fee'], 'locked': False, 'participants': []})
+        self.send_response(303)
+        self.send_header('Location', '/admin?success=reset')
+        self.end_headers()
 
     def _serve_entry_form_redirect(self, message, error=False):
         _, players = fetch_leaderboard()
@@ -1342,9 +1587,10 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
 def main():
     port = int(os.environ.get('PORT', 8051))
     host = '0.0.0.0' if os.environ.get('RENDER') else 'localhost'
+    cfg = load_tournament()
     print("=" * 50)
     print("  Kapelke Golf Pool Dashboard")
-    print(f"  {TOURNAMENT_NAME} {TOURNAMENT_DATES}")
+    print(f"  {cfg['name']} {cfg['dates']}")
     print("=" * 50)
     server = HTTPServer((host, port), GolfPoolHandler)
     url = f'http://{host}:{port}'
