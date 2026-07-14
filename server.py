@@ -452,16 +452,45 @@ def fetch_pga_tournament_status(pga_tour_id):
         return None
 
 
+def _parse_tournament_start(cfg):
+    """Parse the configured tournament's start date from its 'dates' string
+    (e.g. 'Jul 16 - 19', 'Feb 19–22, 2026', 'Apr 9 - 12'). Returns a date or
+    None if it can't be parsed. Uses the year in the string if present, else
+    the current year."""
+    import re
+    s = (cfg.get('dates') or '').strip()
+    m = re.match(r'([A-Za-z]{3,9})\s+(\d{1,2})', s)
+    if not m:
+        return None
+    ym = re.search(r'(20\d{2})', s)
+    year = int(ym.group(1)) if ym else datetime.now().year
+    try:
+        return datetime.strptime(f"{m.group(1)[:3]} {int(m.group(2))} {year}", "%b %d %Y").date()
+    except ValueError:
+        return None
+
+
+def _tournament_not_started(cfg):
+    """True if the configured tournament hasn't begun yet. Uses the start date
+    (no external API — works even where the PGA API is IP-blocked, e.g. the
+    droplet). Falls back to the authoritative PGA status only when the dates
+    string can't be parsed."""
+    start = _parse_tournament_start(cfg)
+    if start is not None:
+        return datetime.now().date() < start
+    return fetch_pga_tournament_status(cfg.get('pga_tour_id', '')) == 'NOT_STARTED'
+
+
 def fetch_leaderboard():
     """Fetch live leaderboard — tries ESPN first, falls back to PGA Tour GraphQL."""
     import gzip as _gzip, base64 as _base64
     cfg = load_tournament()
 
-    # Authoritative pre-tournament gate: if the configured event hasn't started,
-    # don't display a stale featured event (e.g. last week's finished tournament)
+    # Pre-tournament gate: if the configured event hasn't started yet, don't
+    # display a stale featured event (e.g. last week's finished tournament)
     # that ESPN may still surface as its top scoreboard event.
-    if fetch_pga_tournament_status(cfg.get('pga_tour_id', '')) == 'NOT_STARTED':
-        print("  PGA status: NOT_STARTED -> pre-tournament (skipping ESPN)")
+    if _tournament_not_started(cfg):
+        print("  Pre-tournament (configured event hasn't started) -> skipping ESPN")
         return {
             'name': cfg['name'],
             'date': '',
