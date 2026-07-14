@@ -214,6 +214,20 @@ def fetch_player_names():
 
 
 def fetch_next_tournament():
+    """Next upcoming event. Prefer the PGA API (it carries the canonical tour
+    id); fall back to ESPN's calendar where the PGA API is unreachable — e.g.
+    the droplet, whose datacenter IP the PGA API 403-blocks."""
+    try:
+        result = _fetch_next_tournament_pga()
+        if result:
+            return result
+        print("  PGA upcomingSchedule returned no event; trying ESPN calendar")
+    except Exception as e:
+        print(f"  PGA upcomingSchedule failed ({e}); trying ESPN calendar")
+    return _fetch_next_tournament_espn()
+
+
+def _fetch_next_tournament_pga():
     """Fetch the next upcoming PGA Tour event from the PGA Tour GraphQL API."""
     from datetime import datetime as _dt
     query = '{ upcomingSchedule(tourCode: "R", year: "2026") { id tournaments { id tournamentName date startDate courseName city state } } }'
@@ -235,6 +249,60 @@ def fetch_next_tournament():
         'dates':       t['date'],
         'course':      t['courseName'],
         'pga_tour_id': t['id'],
+    }
+
+
+def _fetch_next_tournament_espn():
+    """Next upcoming event from ESPN's season calendar. Used when the PGA API is
+    unreachable. pga_tour_id is left blank — ESPN is the leaderboard source in
+    that case anyway, and the pre-tournament gate keys off the start date."""
+    from datetime import datetime as _dt, timezone as _tz
+    req = urllib.request.Request(ESPN_SCOREBOARD_URL, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
+    data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+    calendar = data.get('leagues', [{}])[0].get('calendar', []) or []
+
+    def _parse(iso):
+        try:
+            return _dt.fromisoformat(iso.replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            return None
+
+    today = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Stable sort keeps the calendar's order for events that share a start week
+    # (e.g. a major over its opposite-field event), matching upcoming[0].
+    upcoming = sorted(
+        (c for c in calendar if _parse(c.get('startDate')) and _parse(c.get('startDate')) >= today),
+        key=lambda c: _parse(c['startDate']),
+    )
+    if not upcoming:
+        return None
+    ev = upcoming[0]
+    start, end = _parse(ev.get('startDate')), _parse(ev.get('endDate'))
+    if start and end and start.month == end.month:
+        dates = f"{start:%b} {start.day} - {end.day}"
+    elif start and end:
+        dates = f"{start:%b} {start.day} - {end:%b} {end.day}"
+    else:
+        dates = ev.get('label', '')
+
+    # Course name comes from the event detail on the public core API — the same
+    # host the tee-time lookup already uses, so it's reachable from the droplet.
+    course = ''
+    try:
+        det = json.loads(urllib.request.urlopen(urllib.request.Request(
+            f"https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/events/{ev.get('id', '')}",
+            headers={'User-Agent': 'Mozilla/5.0'}), timeout=10).read().decode('utf-8'))
+        courses = det.get('courses', []) or []
+        host = next((c for c in courses if c.get('host')), courses[0] if courses else {})
+        course = host.get('name', '')
+    except Exception as e:
+        print(f"  ESPN course lookup failed: {e}")
+
+    return {
+        'name':        ev.get('label', ''),
+        'dates':       dates,
+        'course':      course,
+        'pga_tour_id': '',
     }
 
 
