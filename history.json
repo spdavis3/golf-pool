@@ -1,1 +1,277 @@
-[]
+[
+  {
+    "tournament": "Genesis Invitational",
+    "dates": "Feb 19\u201322, 2026",
+    "year": 2026,
+    "results": [
+      {
+        "name": "Lingvall",
+        "place": "1st",
+        "prize": 175
+      },
+      {
+        "name": "Bob",
+        "place": "2nd",
+        "prize": 25
+      },
+      {
+        "name": "Chuck",
+        "place": "3rd",
+        "prize": 0
+      },
+      {
+        "name": "Randy",
+        "place": "4th",
+        "prize": 0
+      },
+      {
+        "name": "Mikee",
+        "place": "5th",
+        "prize": 0
+      },
+      {
+        "name": "Al",
+        "place": "6th",
+        "prize": 0
+      },
+      {
+        "name": "Sam",
+        "place": "7th",
+        "prize": 0
+      },
+      {
+        "name": "Pedro",
+        "place": "8th",
+        "prize": 0
+      }
+    ]
+  },
+  {
+    "tournament": "Masters Tournament",
+    "dates": "Apr 9 - 12",
+    "year": 2026,
+    "results": [
+      {
+        "name": "Chuck",
+        "place": "1st",
+        "prize": 175,
+        "picks": [
+          "Scottie Scheffler",
+          "Rory McIlroy",
+          "Ludvig \u00c5berg",
+          "Matt Fitzpatrick",
+          "Collin Morikawa",
+          "Si Woo Kim"
+        ]
+      },
+      {
+        "name": "Bob",
+        "place": "2nd",
+        "prize": 25,
+        "picks": [
+          "Scottie Scheffler",
+          "Rory McIlroy",
+          "Collin Morikawa",
+          "Ludvig \u00c5berg",
+          "Rasmus H\u00f8jgaard",
+          "Akshay Bhatia"
+        ]
+      },
+      {
+        "name": "Randy",
+        "place": "3rd",
+        "prize": 0,
+        "picks": [
+          "Jon Rahm",
+          "Cameron Young",
+          "Rory McIlroy",
+          "Hideki Matsuyama",
+          "Robert MacIntyre",
+          "Ludvig \u00c5berg"
+        ]
+      },
+      {
+        "name": "Mikee",
+        "place": "4th",
+        "prize": 0,
+        "picks": [
+          "Akshay Bhatia",
+          "Matt Fitzpatrick",
+          "Viktor Hovland",
+          "Ludvig \u00c5berg",
+          "Collin Morikawa",
+          "Rory McIlroy"
+        ]
+      },
+      {
+        "name": "Lingvall",
+        "place": "5th",
+        "prize": 0,
+        "picks": [
+          "Patrick Reed",
+          "Scottie Scheffler",
+          "Xander Schauffele",
+          "Jon Rahm",
+          "Bryson DeChambeau",
+          "Cameron Young"
+        ]
+      },
+      {
+        "name": "Al",
+        "place": "6th",
+        "prize": 0,
+        "picks": [
+          "Scottie Scheffler",
+          "Xander Schauffele",
+          "Matt Fitzpatrick",
+          "Jon Rahm",
+          "Justin Rose",
+          "Ludvig \u00c5berg"
+        ]
+      },
+      {
+        "name": "Sam",
+        "place": "7th",
+        "prize": 0,
+        "picks": [
+          "Scottie Scheffler",
+          "Ludvig \u00c5berg",
+          "Patrick Reed",
+          "Justin Rose",
+          "Corey Conners",
+          "Akshay Bhatia"
+        ]
+      },
+      {
+        "name": "Pedro",
+        "place": "8th",
+        "prize": 0,
+        "picks": [
+          "Brooks Koepka",
+          "Justin Rose",
+          "Chris Gotterup",
+          "Rasmus H\u00f8jgaard",
+          "J.J. Spaun",
+          "Tommy Fleetwood"
+        ]
+      }
+    ]
+  },
+  {
+    "tournament": "U.S. Open",
+    "dates": "Jun 18 - 21",
+    "year": 2026,
+    "results": [
+      {
+        "name": "Pedro",
+        "place": "T-1st",
+        "prize": 100,
+        "picks": [
+          "Tommy Fleetwood",
+          "J.J. Spaun",
+          "Rory McIlroy",
+          "Scottie Scheffler",
+          "Wyndham Clark",
+          "Shane Lowry"
+        ]
+      },
+      {
+        "name": "Bob",
+        "place": "T-1st",
+        "prize": 100,
+        "picks": [
+          "Scottie Scheffler",
+          "Rory McIlroy",
+          "Brooks Koepka",
+          "Wyndham Clark",
+          "Shane Lowry",
+          "Tommy Fleetwood"
+        ]
+      },
+      {
+        "name": "Mikee",
+        "place": "3rd",
+        "prize": 0,
+        "picks": [
+          "Rory McIlroy",
+          "Ludvig \u00c5berg",
+          "Scottie Scheffler",
+          "Wyndham Clark",
+          "Matt Fitzpatrick",
+          "Viktor Hovland"
+        ]
+      },
+      {
+        "name": "Chuck",
+        "place": "4th",
+        "prize": 0,
+        "picks": [
+          "Scottie Scheffler",
+          "Rory McIlroy",
+          "Sam Burns",
+          "Matt Fitzpatrick",
+          "Justin Rose",
+          "Collin Morikawa"
+        ]
+      },
+      {
+        "name": "Al",
+        "place": "5th",
+        "prize": 0,
+        "picks": [
+          "Scottie Scheffler",
+          "Rory McIlroy",
+          "Xander Schauffele",
+          "Ludvig \u00c5berg",
+          "Tommy Fleetwood",
+          "Chris Gotterup"
+        ]
+      },
+      {
+        "name": "Sam",
+        "place": "6th",
+        "prize": 0,
+        "picks": [
+          "Scottie Scheffler",
+          "Jon Rahm",
+          "Tommy Fleetwood",
+          "Russell Henley",
+          "Chris Gotterup",
+          "Matt Fitzpatrick"
+        ]
+      },
+      {
+        "name": "Lingvall",
+        "place": "7th",
+        "prize": 0,
+        "picks": [
+          "Scottie Scheffler",
+          "Tommy Fleetwood",
+          "Jon Rahm",
+          "Robert MacIntyre",
+          "Viktor Hovland",
+          "Russell Henley"
+        ]
+      },
+      {
+        "name": "Randy",
+        "place": "8th",
+        "prize": 0,
+        "picks": [
+          "Jon Rahm",
+          "Xander Schauffele",
+          "Matt Fitzpatrick",
+          "Aaron Rai",
+          "Si Woo Kim",
+          "Rory McIlroy"
+        ]
+      }
+    ]
+  },
+  {
+    "tournament": "U.S. Open",
+    "dates": "Jun 18 - 21",
+    "year": 2026,
+    "results": []
+  }
+]

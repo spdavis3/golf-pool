@@ -1,8 +1,11 @@
 {
-  "name": "Genesis Invitational",
-  "dates": "Feb 19\u201322, 2026",
-  "course": "Riviera Country Club",
-  "pga_tour_id": "R2026007",
+  "name": "The Open Championship",
+  "dates": "Jul 16 - 19",
+  "course": "Royal Birkdale Golf Club",
+  "pga_tour_id": "R2026100",
   "entry_fee": 25,
-  "admin_password": "golf"
+  "admin_password": "golf",
+  "show_medals": false,
+  "counts_for_career": false,
+  "show_prizes": false
 }

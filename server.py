@@ -6,6 +6,7 @@ Kapelke Golf Pool Dashboard
 import json
 import io
 import os
+import time
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -13,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 _EASTERN = timezone(timedelta(hours=-4), 'ET')  # EDT (UTC-4, used Apr–Nov)
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import webbrowser
+import picklab
 
 
 _DATA_DIR        = os.environ.get('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +30,7 @@ _DEFAULT_TOURNAMENT = {
     'entry_fee': 25,
     'admin_password': 'golf',
     'show_medals': False,
+    'show_prizes': False,
     'counts_for_career': True,
 }
 
@@ -74,9 +77,10 @@ def career_standings():
                 totals[n] = {'name': n, 'tournaments': 0, 'wins': 0, 'seconds': 0, 'winnings': 0}
             totals[n]['tournaments'] += 1
             totals[n]['winnings']    += r.get('prize', 0)
-            if r['place'] == '1st': totals[n]['wins']    += 1
-            if r['place'] == '2nd': totals[n]['seconds'] += 1
-    return sorted(totals.values(), key=lambda x: -x['winnings'])
+            place = r['place'].lstrip('T-')  # 'T-1st' (tie) still counts
+            if place == '1st': totals[n]['wins']    += 1
+            if place == '2nd': totals[n]['seconds'] += 1
+    return sorted(totals.values(), key=lambda x: (-x['winnings'], x['name'].lower()))
 PGA_TOUR_API_URL  = 'https://orchestrator.pgatour.com/graphql'
 PGA_TOUR_API_KEY  = 'da2-gsrx5bibzbb4njvhl7t37wqyl4'
 ESPN_SCOREBOARD_URL = 'https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard'
@@ -86,6 +90,9 @@ OWGR_URL = 'https://apiweb.owgr.com/api/owgr/rankings/getRankings?pageSize=300&p
 _player_names_cache = []
 # Cache for OWGR rankings: name (lowercase) -> rank number
 _owgr_cache = {}
+# Short-lived cache for the authoritative PGA tournament status: id -> (status, epoch)
+_pga_status_cache = {}
+_PGA_STATUS_TTL = 60  # seconds
 
 
 def is_locked():
@@ -231,6 +238,31 @@ def fetch_next_tournament():
     }
 
 
+def _fetch_core_tee_times(event_id, competitor_ids, round_num):
+    """Fetch R{round_num} tee times from ESPN core API in parallel. Returns {competitor_id: (display, sort)}."""
+    from concurrent.futures import ThreadPoolExecutor
+    base = 'http://sports.core.api.espn.com/v2/sports/golf/leagues/pga/events/%s/competitions/%s/competitors/%%s/linescores?lang=en&region=us' % (event_id, event_id)
+
+    def fetch_one(cid):
+        try:
+            with urllib.request.urlopen(base % cid, timeout=5) as r:
+                data = json.loads(r.read())
+            for item in data.get('items', []):
+                if item.get('period') == round_num and item.get('teeTime'):
+                    # ISO UTC format: "2026-06-20T19:45Z"
+                    dt = datetime.strptime(item['teeTime'], '%Y-%m-%dT%H:%MZ').replace(tzinfo=timezone.utc)
+                    et = dt.astimezone(_EASTERN)
+                    h = et.hour % 12 or 12
+                    ampm = 'AM' if et.hour < 12 else 'PM'
+                    return cid, (f'{h}:{et.minute:02d} {ampm}', f'{et.hour:02d}:{et.minute:02d}')
+        except Exception:
+            pass
+        return cid, ('', '')
+
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        return dict(ex.map(fetch_one, competitor_ids))
+
+
 def _parse_espn_tee_time(s):
     """Parse ESPN tee time string (e.g. 'Thu Apr 09 08:14:00 PDT 2026') to ET display + sort key.
     ESPN labels times with PDT/PST but they are already in ET — no conversion needed."""
@@ -271,6 +303,27 @@ def fetch_leaderboard_espn(cfg):
     current_round = comp_status.get('period', 1)
     round_in_progress = status_type.get('state') == 'in'
 
+    # If the round just ended (state='post'), ESPN adds a next-round placeholder period.
+    # Advance current_round so players show as "not started" for the upcoming round
+    # and tee times appear once ESPN publishes them.
+    core_tee_times = {}  # competitor_id -> (display, sort)
+    if not round_in_progress:
+        all_periods = set()
+        for c in competitors[:30]:
+            for ls in c.get('linescores', []):
+                all_periods.add(ls.get('period', 0))
+        if (current_round + 1) in all_periods:
+            current_round += 1
+            # Scoreboard API doesn't carry tee times between rounds — fetch from core API
+            event_id = event.get('id', '')
+            comp_ids = [c.get('id', '') for c in competitors if c.get('id')]
+            if event_id and comp_ids:
+                core_tee_times = _fetch_core_tee_times(event_id, comp_ids, current_round)
+
+    # If tee times were published, players without one missed the cut
+    tee_times_published = any(v[0] for v in core_tee_times.values())
+    early_cut_ids = {cid for cid, v in core_tee_times.items() if not v[0]} if tee_times_published else set()
+
     tournament = {
         'name': cfg['name'],
         'espn_event_name': event.get('name', ''),
@@ -299,23 +352,39 @@ def fetch_leaderboard_espn(cfg):
                 round_scores.append(val)
                 if rnd == current_round:
                     today_score = val
-            if rnd == current_round and round_in_progress:
+            if rnd == current_round:
                 hole_scores = ls.get('linescores', [])
-                if len(hole_scores) >= 18:
-                    thru = 'F'
-                elif hole_scores:
-                    thru = str(hole_scores[-1].get('period', len(hole_scores)))
-        max_round = max((ls.get('period', 0) for ls in linescores), default=0)
-        is_cut = current_round >= 3 and 0 < max_round <= 2
-        # Extract tee time for current round from linescore statistics
-        tee_time_et = ''
-        tee_time_sort = ''
-        cur_ls = next((ls for ls in linescores if ls.get('period') == current_round), {})
-        for stat in cur_ls.get('statistics', {}).get('categories', [{}])[0].get('stats', []):
-            dv = stat.get('displayValue', '')
-            if any(tz in dv for tz in ('PDT', 'PST', 'EDT', 'EST')):
-                tee_time_et, tee_time_sort = _parse_espn_tee_time(dv)
-                break
+                if round_in_progress or hole_scores:
+                    if len(hole_scores) >= 18:
+                        thru = 'F'
+                    elif hole_scores:
+                        thru = str(hole_scores[-1].get('period', len(hole_scores)))
+        # Only credit a round if: prior round (has score value) or current round (has hole data)
+        max_round = 0
+        for ls in linescores:
+            p_num = ls.get('period', 0)
+            if p_num < current_round and ls.get('displayValue'):
+                max_round = max(max_round, p_num)
+            elif p_num == current_round and ls.get('linescores'):
+                max_round = max(max_round, p_num)
+        comp_id = c.get('id', '')
+        # Extract tee time first — needed for cut detection
+        if comp_id in core_tee_times:
+            tee_time_et, tee_time_sort = core_tee_times[comp_id]
+        else:
+            tee_time_et = ''
+            tee_time_sort = ''
+            cur_ls = next((ls for ls in linescores if ls.get('period') == current_round), {})
+            for stat in cur_ls.get('statistics', {}).get('categories', [{}])[0].get('stats', []):
+                dv = stat.get('displayValue', '')
+                if any(tz in dv for tz in ('PDT', 'PST', 'EDT', 'EST')):
+                    tee_time_et, tee_time_sort = _parse_espn_tee_time(dv)
+                    break
+        # Mark cut: absent from tee sheet (between rounds) OR no R3 holes AND no tee time (during R3)
+        # A player with a tee time made the cut even if they haven't started yet.
+        is_cut = (comp_id in early_cut_ids) or (
+            round_in_progress and current_round >= 3 and 0 < max_round <= 2 and not tee_time_et
+        )
         players.append({
             'name': name,
             'position': position,
@@ -354,10 +423,53 @@ def fetch_leaderboard_espn(cfg):
     return tournament, players
 
 
+def fetch_pga_tournament_status(pga_tour_id):
+    """Return the authoritative tournamentStatus for the configured event
+    (e.g. 'NOT_STARTED', 'IN_PROGRESS', 'COMPLETED', 'SUSPENDED'), or None if
+    unavailable. Keyed to the exact tournament id, so it can't be fooled by
+    ESPN featuring a different (e.g. last week's) event. Cached briefly."""
+    import gzip as _gzip, base64 as _base64
+    if not pga_tour_id:
+        return None
+    cached = _pga_status_cache.get(pga_tour_id)
+    if cached and (time.time() - cached[1]) < _PGA_STATUS_TTL:
+        return cached[0]
+    query = '{ leaderboardCompressedV2(id: "' + pga_tour_id + '") { id payload } }'
+    body = json.dumps({'query': query}).encode('utf-8')
+    try:
+        req = urllib.request.Request(
+            PGA_TOUR_API_URL, data=body,
+            headers={'Content-Type': 'application/json', 'x-api-key': PGA_TOUR_API_KEY, 'User-Agent': 'Mozilla/5.0'},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        payload = json.loads(resp.read().decode('utf-8'))['data']['leaderboardCompressedV2']['payload']
+        data = json.loads(_gzip.decompress(_base64.b64decode(payload)))
+        status = data.get('tournamentStatus')
+        _pga_status_cache[pga_tour_id] = (status, time.time())
+        return status
+    except Exception as e:
+        print(f"  PGA status check error: {e}")
+        return None
+
+
 def fetch_leaderboard():
     """Fetch live leaderboard — tries ESPN first, falls back to PGA Tour GraphQL."""
     import gzip as _gzip, base64 as _base64
     cfg = load_tournament()
+
+    # Authoritative pre-tournament gate: if the configured event hasn't started,
+    # don't display a stale featured event (e.g. last week's finished tournament)
+    # that ESPN may still surface as its top scoreboard event.
+    if fetch_pga_tournament_status(cfg.get('pga_tour_id', '')) == 'NOT_STARTED':
+        print("  PGA status: NOT_STARTED -> pre-tournament (skipping ESPN)")
+        return {
+            'name': cfg['name'],
+            'date': '',
+            'status': 'Not Started',
+            'course': cfg['course'],
+            'current_round': 1,
+            'pre_tournament': True,
+        }, []
 
     # Try ESPN first (more reliable during active rounds)
     try:
@@ -524,30 +636,54 @@ def calculate_standings(participants, players):
             })
         # Sort by position (best first)
         picks_with_pos.sort(key=lambda x: x['position'])
+        # Flatten cut / not-in-field players to a single equal value so they
+        # cannot break ties between participants: every missed-cut pick scores
+        # the same, regardless of where on the leaderboard they landed.
+        CUT_FLAT = 9999
+        flat_key = sorted(
+            CUT_FLAT if (p['cut'] or p['position'] >= 999) else p['position']
+            for p in picks_with_pos
+        )
         standings.append({
             'name': participant['name'],
             'picks': picks_with_pos,
-            'sort_key': [p['position'] for p in picks_with_pos],
+            'sort_key': flat_key,
         })
 
     # Sort standings: best pick wins, cascade to next best on ties
     standings.sort(key=lambda s: s['sort_key'])
 
-    # Assign prizes
+    # Assign prizes, splitting pooled money evenly across any tie group.
     entry_fee = load_tournament()['entry_fee']
     total_pot = len(participants) * entry_fee
-    for i, s in enumerate(standings):
-        n = i + 1
-        suffix = 'th' if 11 <= n <= 13 else {1:'st',2:'nd',3:'rd'}.get(n % 10, 'th')
-        if i == 0:
-            s['prize'] = total_pot - entry_fee if len(participants) > 1 else total_pot
-            s['place'] = '1st'
-        elif i == 1:
-            s['prize'] = entry_fee
-            s['place'] = '2nd'
-        else:
-            s['prize'] = 0
-            s['place'] = f'{n}{suffix}'
+    multi = len(participants) > 1
+
+    def prize_for_rank(rank):
+        if rank == 1:
+            return total_pot - entry_fee if multi else total_pot
+        if rank == 2:
+            return entry_fee if multi else 0
+        return 0
+
+    def ordinal(nn):
+        suffix = 'th' if 11 <= nn <= 13 else {1:'st',2:'nd',3:'rd'}.get(nn % 10, 'th')
+        return f'{nn}{suffix}'
+
+    i = 0
+    while i < len(standings):
+        j = i
+        while j + 1 < len(standings) and standings[j + 1]['sort_key'] == standings[i]['sort_key']:
+            j += 1
+        group = standings[i:j + 1]
+        # Tied players share the combined prize money for the ranks they occupy.
+        pool = sum(prize_for_rank(r) for r in range(i + 1, j + 2))
+        share = pool / len(group)
+        share = int(share) if share == int(share) else round(share, 2)
+        place = ('T-' if len(group) > 1 else '') + ordinal(i + 1)
+        for s in group:
+            s['prize'] = share
+            s['place'] = place
+        i = j + 1
 
     return standings
 
@@ -555,20 +691,36 @@ def calculate_standings(participants, players):
 # --- HTML generation ---
 
 STYLES = """
+:root {
+    --c-bg: #0c1a0c;
+    --c-bg2: #1a3320;
+    --c-bg-dark: #0f2615;
+    --c-bg3: #142a1a;
+    --c-border: #2d5a38;
+    --c-accent: #4a9e5c;
+    --c-accent-rgb: 74, 158, 92;
+    --c-accent2: #5cb86e;
+    --c-gold: #e8d44d;
+    --c-gold-rgb: 232, 212, 77;
+    --c-text: #e8efe8;
+    --c-muted: #7a9a7a;
+    --c-tint: #8abf8a;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
     font-family: 'Georgia', 'Times New Roman', serif;
-    background-color: #0c1a0c;
-    color: #e8efe8;
+    background-color: var(--c-bg);
+    color: var(--c-text);
     padding: 20px;
 }
 
 .container { max-width: 1400px; margin: 0 auto; }
 
 .header {
-    background: linear-gradient(135deg, #1a3320 0%, #0f2615 100%);
-    border: 2px solid #4a9e5c;
+    background: linear-gradient(135deg, var(--c-bg2) 0%, var(--c-bg-dark) 100%);
+    border: 2px solid var(--c-accent);
     border-radius: 12px;
     padding: 30px;
     margin-bottom: 30px;
@@ -584,19 +736,19 @@ body {
 
 h1 {
     font-size: 2.2em;
-    color: #e8d44d;
+    color: var(--c-gold);
     margin-bottom: 5px;
     letter-spacing: 1px;
 }
 
 .subtitle {
-    color: #8abf8a;
+    color: var(--c-tint);
     font-size: 1.1em;
     font-style: italic;
 }
 
 .updated {
-    color: #7a9a7a;
+    color: var(--c-muted);
     font-size: 0.85em;
     margin-top: 8px;
 }
@@ -609,8 +761,8 @@ h1 {
 }
 
 .refresh-btn {
-    background: #4a9e5c;
-    color: #0c1a0c;
+    background: var(--c-accent);
+    color: var(--c-bg);
     border: none;
     border-radius: 8px;
     padding: 12px 24px;
@@ -624,14 +776,14 @@ h1 {
     gap: 8px;
 }
 
-.refresh-btn:hover { background: #5cb86e; }
+.refresh-btn:hover { background: var(--c-accent2); }
 .refresh-btn:active { transform: scale(0.96); }
 .refresh-btn.spinning .refresh-icon { animation: spin 0.8s linear infinite; }
 .refresh-icon { display: inline-block; font-size: 1.1em; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 .countdown {
-    color: #7a9a7a;
+    color: var(--c-muted);
     font-size: 0.8em;
     font-style: italic;
 }
@@ -644,29 +796,29 @@ h1 {
 }
 
 .card {
-    background: #1a3320;
-    border: 1px solid #2d5a38;
+    background: var(--c-bg2);
+    border: 1px solid var(--c-border);
     border-radius: 12px;
     padding: 25px;
     transition: border-color 0.3s;
 }
 
-.card:hover { border-color: #4a9e5c; }
+.card:hover { border-color: var(--c-accent); }
 
 .card h2 {
-    color: #e8d44d;
+    color: var(--c-gold);
     font-size: 1.15em;
     margin-bottom: 18px;
     padding-bottom: 10px;
-    border-bottom: 2px solid #4a9e5c;
+    border-bottom: 2px solid var(--c-accent);
     letter-spacing: 0.5px;
 }
 
 .full-width { grid-column: 1 / -1; }
 
 .status-card {
-    background: linear-gradient(135deg, #14291a, #0c1a0c);
-    border: 2px solid #4a9e5c;
+    background: linear-gradient(135deg, var(--c-bg3), var(--c-bg));
+    border: 2px solid var(--c-accent);
 }
 
 .status-grid {
@@ -680,7 +832,7 @@ h1 {
 }
 
 .status-label {
-    color: #7a9a7a;
+    color: var(--c-muted);
     font-size: 0.8em;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -689,7 +841,7 @@ h1 {
 .status-value {
     font-size: 1.4em;
     font-weight: bold;
-    color: #e8efe8;
+    color: var(--c-text);
     margin-top: 5px;
 }
 
@@ -701,29 +853,29 @@ h1 {
 
 .standings-table th {
     text-align: left;
-    color: #e8d44d;
+    color: var(--c-gold);
     font-size: 0.8em;
     text-transform: uppercase;
     letter-spacing: 1px;
     padding: 10px 12px;
-    border-bottom: 2px solid #4a9e5c;
+    border-bottom: 2px solid var(--c-accent);
 }
 
 .standings-table td {
     padding: 12px;
-    border-bottom: 1px solid #2d5a38;
-    color: #e8efe8;
+    border-bottom: 1px solid var(--c-border);
+    color: var(--c-text);
 }
 
-.standings-table tr:hover { background: rgba(74, 158, 92, 0.1); }
+.standings-table tr:hover { background: rgba(var(--c-accent-rgb), 0.1); }
 
-.place-1 { color: #e8d44d; font-weight: bold; }
+.place-1 { color: var(--c-gold); font-weight: bold; }
 .place-2 { color: #c0c0c0; font-weight: bold; }
 
-.prize { color: #e8d44d; font-weight: bold; }
+.prize { color: var(--c-gold); font-weight: bold; }
 .pick-unique { color: #7ed87e; font-weight: bold; }
-.pick-shared { color: #7a9a7a; }
-.pick-pos { font-size: 0.85em; color: #7a9a7a; margin-left: 4px; }
+.pick-shared { color: var(--c-muted); }
+.pick-pos { font-size: 0.85em; color: var(--c-muted); margin-left: 4px; }
 
 /* Leaderboard */
 .lb-table {
@@ -733,31 +885,31 @@ h1 {
 
 .lb-table th {
     text-align: left;
-    color: #e8d44d;
+    color: var(--c-gold);
     font-size: 0.8em;
     text-transform: uppercase;
     letter-spacing: 1px;
     padding: 8px 12px;
-    border-bottom: 2px solid #4a9e5c;
+    border-bottom: 2px solid var(--c-accent);
 }
 
 .lb-table td {
     padding: 8px 12px;
-    border-bottom: 1px solid #2d5a38;
-    color: #e8efe8;
+    border-bottom: 1px solid var(--c-border);
+    color: var(--c-text);
     font-size: 0.95em;
 }
 
-.lb-table tr:hover { background: rgba(74, 158, 92, 0.1); }
-.lb-table tr.picked { background: rgba(232, 212, 77, 0.08); border-left: 3px solid #e8d44d; }
+.lb-table tr:hover { background: rgba(var(--c-accent-rgb), 0.1); }
+.lb-table tr.picked { background: rgba(var(--c-gold-rgb), 0.08); border-left: 3px solid var(--c-gold); }
 
 .score-under { color: #f25c5c; font-weight: bold; }
-.score-over { color: #7a9a7a; font-weight: bold; }
-.score-even { color: #e8efe8; font-weight: bold; }
+.score-over { color: var(--c-muted); font-weight: bold; }
+.score-even { color: var(--c-text); font-weight: bold; }
 
 .picked-badge {
-    background: rgba(232, 212, 77, 0.2);
-    color: #e8d44d;
+    background: rgba(var(--c-gold-rgb), 0.2);
+    color: var(--c-gold);
     padding: 2px 8px;
     border-radius: 4px;
     font-size: 0.75em;
@@ -768,7 +920,7 @@ h1 {
 
 .cut-badge {
     background: #5a2020;
-    color: #e8efe8;
+    color: var(--c-text);
     padding: 2px 8px;
     border-radius: 4px;
     font-size: 0.8em;
@@ -783,22 +935,22 @@ h1 {
 }
 
 .participant-card {
-    background: #142a1a;
-    border: 1px solid #2d5a38;
+    background: var(--c-bg3);
+    border: 1px solid var(--c-border);
     border-radius: 8px;
     padding: 18px;
     transition: border-color 0.3s;
 }
 
-.participant-card:hover { border-color: #4a9e5c; }
+.participant-card:hover { border-color: var(--c-accent); }
 
 .participant-name {
     font-size: 1.2em;
     font-weight: bold;
-    color: #e8d44d;
+    color: var(--c-gold);
     margin-bottom: 12px;
     padding-bottom: 8px;
-    border-bottom: 1px solid #2d5a38;
+    border-bottom: 1px solid var(--c-border);
 }
 
 .pick-item {
@@ -808,12 +960,12 @@ h1 {
     font-size: 0.9em;
 }
 
-.pick-golfer { color: #e8efe8; }
+.pick-golfer { color: var(--c-text); }
 
 .entry-link {
     display: inline-block;
-    background: #4a9e5c;
-    color: #0c1a0c;
+    background: var(--c-accent);
+    color: var(--c-bg);
     padding: 10px 20px;
     border-radius: 8px;
     text-decoration: none;
@@ -823,10 +975,10 @@ h1 {
     margin-top: 15px;
 }
 
-.entry-link:hover { background: #5cb86e; }
+.entry-link:hover { background: var(--c-accent2); }
 
 .no-data {
-    color: #7a9a7a;
+    color: var(--c-muted);
     font-style: italic;
     text-align: center;
     padding: 30px;
@@ -844,7 +996,7 @@ h1 {
 
 .form-group label {
     display: block;
-    color: #e8d44d;
+    color: var(--c-gold);
     font-size: 0.9em;
     margin-bottom: 6px;
     letter-spacing: 0.5px;
@@ -853,10 +1005,10 @@ h1 {
 .form-group input {
     width: 100%;
     padding: 12px;
-    background: #142a1a;
-    border: 1px solid #2d5a38;
+    background: var(--c-bg3);
+    border: 1px solid var(--c-border);
     border-radius: 8px;
-    color: #e8efe8;
+    color: var(--c-text);
     font-size: 1em;
     font-family: 'Georgia', serif;
     transition: border-color 0.3s;
@@ -864,14 +1016,14 @@ h1 {
 
 .form-group input:focus {
     outline: none;
-    border-color: #4a9e5c;
+    border-color: var(--c-accent);
 }
 
 .form-group input::placeholder { color: #5a7a5a; }
 
 .submit-btn {
-    background: #4a9e5c;
-    color: #0c1a0c;
+    background: var(--c-accent);
+    color: var(--c-bg);
     border: none;
     border-radius: 8px;
     padding: 14px 32px;
@@ -884,10 +1036,10 @@ h1 {
     margin-top: 10px;
 }
 
-.submit-btn:hover { background: #5cb86e; }
+.submit-btn:hover { background: var(--c-accent2); }
 
 .back-link {
-    color: #4a9e5c;
+    color: var(--c-accent);
     text-decoration: none;
     font-size: 0.9em;
 }
@@ -895,8 +1047,8 @@ h1 {
 .back-link:hover { text-decoration: underline; }
 
 .msg-success {
-    background: rgba(74, 158, 92, 0.2);
-    border: 1px solid #4a9e5c;
+    background: rgba(var(--c-accent-rgb), 0.2);
+    border: 1px solid var(--c-accent);
     padding: 15px;
     border-radius: 8px;
     color: #7ed87e;
@@ -919,7 +1071,7 @@ h1 {
     gap: 8px;
     margin-top: 12px;
     padding-top: 10px;
-    border-top: 1px solid #2d5a38;
+    border-top: 1px solid var(--c-border);
 }
 
 .btn-edit, .btn-delete {
@@ -937,23 +1089,23 @@ h1 {
 }
 
 .btn-edit {
-    background: #4a9e5c;
-    color: #0c1a0c;
+    background: var(--c-accent);
+    color: var(--c-bg);
 }
 
-.btn-edit:hover { background: #5cb86e; }
+.btn-edit:hover { background: var(--c-accent2); }
 
 .btn-delete {
     background: #5a2020;
-    color: #e8efe8;
+    color: var(--c-text);
 }
 
 .btn-delete:hover { background: #7a3030; }
 
 .owgr-rank {
     display: inline-block;
-    background: #0c1a0c;
-    color: #e8d44d;
+    background: var(--c-bg);
+    color: var(--c-gold);
     padding: 1px 6px;
     border-radius: 4px;
     font-size: 0.8em;
@@ -961,12 +1113,12 @@ h1 {
     min-width: 32px;
     text-align: center;
     margin-right: 4px;
-    border: 1px solid #2d5a38;
+    border: 1px solid var(--c-border);
 }
 
 .locked-badge {
     background: #5a2020;
-    color: #e8efe8;
+    color: var(--c-text);
     padding: 4px 12px;
     border-radius: 6px;
     font-size: 0.8em;
@@ -982,8 +1134,8 @@ h1 {
 }
 
 .open-entry-btn {
-    background: #4a9e5c;
-    color: #0c1a0c;
+    background: var(--c-accent);
+    color: var(--c-bg);
     border: none;
     border-radius: 8px;
     padding: 10px 18px;
@@ -995,7 +1147,7 @@ h1 {
     transition: background 0.3s;
 }
 
-.open-entry-btn:hover { background: #5cb86e; }
+.open-entry-btn:hover { background: var(--c-accent2); }
 .open-entry-btn--locked { background: #7a2020; color: #f8d7d7; cursor: default; }
 
 .lock-icon-btn {
@@ -1015,7 +1167,7 @@ h1 {
     align-items: center;
     gap: 8px;
     background: #5a2020;
-    color: #e8efe8;
+    color: var(--c-text);
     padding: 8px 14px;
     border-radius: 8px;
     font-size: 0.9em;
@@ -1030,6 +1182,140 @@ h1 {
 """
 
 
+COURSE_THEMES = {
+    # Augusta National / Masters (default — deep forest green, Masters yellow)
+    'default': {
+        '--c-bg': '#0c1a0c', '--c-bg2': '#1a3320', '--c-bg-dark': '#0f2615', '--c-bg3': '#142a1a',
+        '--c-border': '#2d5a38', '--c-accent': '#4a9e5c', '--c-accent-rgb': '74, 158, 92',
+        '--c-accent2': '#5cb86e', '--c-gold': '#e8d44d', '--c-gold-rgb': '232, 212, 77',
+        '--c-text': '#e8efe8', '--c-muted': '#7a9a7a', '--c-tint': '#8abf8a',
+    },
+    # Pebble Beach / Pacific coast (midnight navy, ocean blue, sand dollar gold)
+    'pacific': {
+        '--c-bg': '#070f1c', '--c-bg2': '#0f1e30', '--c-bg-dark': '#071420', '--c-bg3': '#0d1a28',
+        '--c-border': '#1e3d5c', '--c-accent': '#2e78c8', '--c-accent-rgb': '46, 120, 200',
+        '--c-accent2': '#4090e0', '--c-gold': '#c8a84d', '--c-gold-rgb': '200, 168, 77',
+        '--c-text': '#e8eff8', '--c-muted': '#6a8aaa', '--c-tint': '#90b0d0',
+    },
+    # TPC Sawgrass / Florida coast (deep teal, Atlantic sun-gold)
+    'florida_coast': {
+        '--c-bg': '#07141a', '--c-bg2': '#0e2530', '--c-bg-dark': '#081820', '--c-bg3': '#0c2028',
+        '--c-border': '#1a4a55', '--c-accent': '#28808a', '--c-accent-rgb': '40, 128, 138',
+        '--c-accent2': '#35a0b0', '--c-gold': '#e09020', '--c-gold-rgb': '224, 144, 32',
+        '--c-text': '#e8f4f4', '--c-muted': '#6a9090', '--c-tint': '#88b8b8',
+    },
+    # TPC Scottsdale / Sonoran Desert (terracotta adobe, desert sun)
+    'desert': {
+        '--c-bg': '#180b04', '--c-bg2': '#2a1508', '--c-bg-dark': '#180e05', '--c-bg3': '#221008',
+        '--c-border': '#5a2a0e', '--c-accent': '#c85820', '--c-accent-rgb': '200, 88, 32',
+        '--c-accent2': '#e06832', '--c-gold': '#e8c040', '--c-gold-rgb': '232, 192, 64',
+        '--c-text': '#f0e8e0', '--c-muted': '#9a7060', '--c-tint': '#c0a080',
+    },
+    # Bay Hill / Arnold Palmer (navy, Florida orange)
+    'bay_hill': {
+        '--c-bg': '#070e18', '--c-bg2': '#101a2e', '--c-bg-dark': '#070c1e', '--c-bg3': '#0e1828',
+        '--c-border': '#1e3058', '--c-accent': '#1e5098', '--c-accent-rgb': '30, 80, 152',
+        '--c-accent2': '#2868c0', '--c-gold': '#e87820', '--c-gold-rgb': '232, 120, 32',
+        '--c-text': '#e8eef8', '--c-muted': '#6a7890', '--c-tint': '#88a0c0',
+    },
+    # Muirfield Village / Memorial (golden bear amber, autumn Ohio)
+    'ohio': {
+        '--c-bg': '#0e0c06', '--c-bg2': '#1c1808', '--c-bg-dark': '#120e04', '--c-bg3': '#181404',
+        '--c-border': '#3c3010', '--c-accent': '#8a7020', '--c-accent-rgb': '138, 112, 32',
+        '--c-accent2': '#b09030', '--c-gold': '#d4b040', '--c-gold-rgb': '212, 176, 64',
+        '--c-text': '#f0ece0', '--c-muted': '#888060', '--c-tint': '#b0a870',
+    },
+    # TOUR Championship / East Lake Atlanta (Georgia red clay, peach gold)
+    'georgia': {
+        '--c-bg': '#120808', '--c-bg2': '#221010', '--c-bg-dark': '#180808', '--c-bg3': '#1c0c0c',
+        '--c-border': '#4a1818', '--c-accent': '#a03020', '--c-accent-rgb': '160, 48, 32',
+        '--c-accent2': '#c03c28', '--c-gold': '#e8c050', '--c-gold-rgb': '232, 192, 80',
+        '--c-text': '#f0e8e8', '--c-muted': '#9a7070', '--c-tint': '#c09090',
+    },
+    # The Open Championship / Scottish venues (heather purple, whisky amber)
+    'scotland': {
+        '--c-bg': '#0a0810', '--c-bg2': '#141020', '--c-bg-dark': '#0c0a18', '--c-bg3': '#100e1c',
+        '--c-border': '#302858', '--c-accent': '#6854b8', '--c-accent-rgb': '104, 84, 184',
+        '--c-accent2': '#8878d8', '--c-gold': '#c8a840', '--c-gold-rgb': '200, 168, 64',
+        '--c-text': '#e8e4f0', '--c-muted': '#7870a0', '--c-tint': '#a898c8',
+    },
+    # US Open / Pinehurst (USGA navy, Carolina sand)
+    'pinehurst': {
+        '--c-bg': '#080c18', '--c-bg2': '#101828', '--c-bg-dark': '#080e20', '--c-bg3': '#0e1622',
+        '--c-border': '#1e3050', '--c-accent': '#284898', '--c-accent-rgb': '40, 72, 152',
+        '--c-accent2': '#3860c0', '--c-gold': '#d8b860', '--c-gold-rgb': '216, 184, 96',
+        '--c-text': '#e8eef4', '--c-muted': '#6a7890', '--c-tint': '#90a8c0',
+    },
+    # RBC Heritage / Harbour Town Hilton Head (maritime blue, lighthouse red-gold)
+    'harbour_town': {
+        '--c-bg': '#081018', '--c-bg2': '#102030', '--c-bg-dark': '#081520', '--c-bg3': '#0e1c28',
+        '--c-border': '#1e3848', '--c-accent': '#285878', '--c-accent-rgb': '40, 88, 120',
+        '--c-accent2': '#3870a0', '--c-gold': '#d84030', '--c-gold-rgb': '216, 64, 48',
+        '--c-text': '#e8f0f4', '--c-muted': '#688090', '--c-tint': '#90b0c0',
+    },
+    # Colonial / Charles Schwab / Fort Worth TX (Texas burgundy wine, lone star gold)
+    'colonial': {
+        '--c-bg': '#0f080e', '--c-bg2': '#1e1018', '--c-bg-dark': '#140a12', '--c-bg3': '#180c14',
+        '--c-border': '#501830', '--c-accent': '#8a1040', '--c-accent-rgb': '138, 16, 64',
+        '--c-accent2': '#b01858', '--c-gold': '#c8a040', '--c-gold-rgb': '200, 160, 64',
+        '--c-text': '#f0e8ec', '--c-muted': '#9a7080', '--c-tint': '#c09090',
+    },
+    # Riviera / Genesis / LA (LA sunset gold, Hollywood purple)
+    'riviera': {
+        '--c-bg': '#0e0c14', '--c-bg2': '#1c1a28', '--c-bg-dark': '#100e1a', '--c-bg3': '#181622',
+        '--c-border': '#3a3060', '--c-accent': '#7060a8', '--c-accent-rgb': '112, 96, 168',
+        '--c-accent2': '#9080c8', '--c-gold': '#f0c830', '--c-gold-rgb': '240, 200, 48',
+        '--c-text': '#f0eef8', '--c-muted': '#808098', '--c-tint': '#a090c0',
+    },
+    # Quail Hollow / Charlotte NC (Carolina blue-teal, Queen City steel)
+    'quail_hollow': {
+        '--c-bg': '#080e10', '--c-bg2': '#101e22', '--c-bg-dark': '#081418', '--c-bg3': '#0e1820',
+        '--c-border': '#1a3c44', '--c-accent': '#2a7a8a', '--c-accent-rgb': '42, 122, 138',
+        '--c-accent2': '#3a9aae', '--c-gold': '#e8c840', '--c-gold-rgb': '232, 200, 64',
+        '--c-text': '#e8f0f4', '--c-muted': '#6a8a90', '--c-tint': '#88b0b8',
+    },
+    # Bethpage / Northeast US (dark steel, New York grit)
+    'northeast': {
+        '--c-bg': '#080c14', '--c-bg2': '#101828', '--c-bg-dark': '#080f1c', '--c-bg3': '#0e1622',
+        '--c-border': '#1e3050', '--c-accent': '#2a50a0', '--c-accent-rgb': '42, 80, 160',
+        '--c-accent2': '#3a68c8', '--c-gold': '#c0a840', '--c-gold-rgb': '192, 168, 64',
+        '--c-text': '#e8eef8', '--c-muted': '#6a7a9a', '--c-tint': '#8090b8',
+    },
+}
+
+def get_theme(course_name='', tournament_name=''):
+    combined = (course_name + ' ' + tournament_name).lower()
+    if any(k in combined for k in ['pebble beach', 'spyglass', 'monterey', 'at&t pebble']):
+        return COURSE_THEMES['pacific']
+    if any(k in combined for k in ['sawgrass', 'ponte vedra', 'players championship']):
+        return COURSE_THEMES['florida_coast']
+    if any(k in combined for k in ['scottsdale', 'tpc scottsdale', 'phoenix open', 'waste management', 'wm phoenix']):
+        return COURSE_THEMES['desert']
+    if any(k in combined for k in ['bay hill', 'arnold palmer']):
+        return COURSE_THEMES['bay_hill']
+    if any(k in combined for k in ['muirfield village', 'memorial tournament', 'memorial park']):
+        return COURSE_THEMES['ohio']
+    if any(k in combined for k in ['east lake', 'tour championship']):
+        return COURSE_THEMES['georgia']
+    if any(k in combined for k in ['carnoustie', 'st. andrews', 'st andrews', 'royal troon', 'muirfield',
+                                    'turnberry', 'hoylake', 'birkdale', 'open championship', 'the open']):
+        return COURSE_THEMES['scotland']
+    if any(k in combined for k in ['pinehurst', 'us open', 'u.s. open', 'bethpage']):
+        return COURSE_THEMES['pinehurst']
+    if any(k in combined for k in ['harbour town', 'hilton head', 'rbc heritage', 'sea pines']):
+        return COURSE_THEMES['harbour_town']
+    if any(k in combined for k in ['colonial', 'fort worth', 'charles schwab', 'valero', 'san antonio']):
+        return COURSE_THEMES['colonial']
+    if any(k in combined for k in ['riviera', 'genesis invitational', 'los angeles', 'pacific palisades']):
+        return COURSE_THEMES['riviera']
+    if any(k in combined for k in ['quail hollow', 'charlotte', 'wells fargo', 'bmw championship']):
+        return COURSE_THEMES['quail_hollow']
+    if any(k in combined for k in ['bethpage', 'new york', 'liberty national', 'winged foot']):
+        return COURSE_THEMES['northeast']
+    # Augusta National / Masters or anything else → default green
+    return COURSE_THEMES['default']
+
+
 def generate_dashboard_html(tournament, players, picks_data, standings, career=None, cfg=None):
     if cfg is None:
         cfg = load_tournament()
@@ -1038,6 +1324,9 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
     entry_fee = picks_data.get('entry_fee', cfg['entry_fee'])
     total_pot = len(participants) * entry_fee
     locked = picks_data.get('locked', False)
+
+    theme = get_theme(cfg.get('course', ''), cfg.get('name', ''))
+    theme_css = '\n'.join(f'        {k}: {v};' for k, v in theme.items())
 
     # Build set of picked golfer names (lowercase) -> who picked them
     picked_by = {}
@@ -1053,8 +1342,9 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
     name_words = [w for w in cfg_name.split() if len(w) > 3]
     espn_event = tournament.get('espn_event_name', '').lower()
     wrong_event = bool(name_words) and bool(espn_event) and not any(w in espn_event for w in name_words)
-    pre_tourney = scheduled or wrong_event
-    display_status = 'Not Started' if wrong_event else status_str
+    not_started = tournament.get('pre_tournament', False)
+    pre_tourney = scheduled or wrong_event or not_started
+    display_status = 'Not Started' if (wrong_event or not_started) else status_str
     any_started = not pre_tourney and any(
         p.get('thru', '-') != '-' and not p.get('cut', False) for p in players
     )
@@ -1078,7 +1368,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
             </div>
             <div class="status-item">
                 <div class="status-label">Prize Pool</div>
-                <div class="status-value" style="color: #e8d44d;">${total_pot}</div>
+                <div class="status-value" style="color: var(--c-gold);">${total_pot}</div>
             </div>
         </div>
     </div>
@@ -1090,11 +1380,13 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
     if standings and not pre_tourney:
         rows = ""
         for s in standings:
-            place_class = 'place-1' if s['place'] == '1st' else ('place-2' if s['place'] == '2nd' else '')
-            if is_official and s['place'] == '1st':
-                place_display = '🥇'
-            elif is_official and s['place'] == '2nd':
-                place_display = '🥈'
+            base_place = s['place'].lstrip('T-')  # treat 'T-1st' like '1st'
+            tie_mark = 'T-' if s['place'].startswith('T-') else ''
+            place_class = 'place-1' if base_place == '1st' else ('place-2' if base_place == '2nd' else '')
+            if is_official and base_place == '1st':
+                place_display = tie_mark + '🥇'
+            elif is_official and base_place == '2nd':
+                place_display = tie_mark + '🥈'
             else:
                 place_display = s['place']
             best_picks = []
@@ -1114,13 +1406,13 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
                         pos_str = '—'
                     best_picks.append(f'<span class="{css}">{pk["name"]}<span class="pick-pos">({pos_str})</span></span>')
             prize_str = '-'
-            if not pre_tourney:
+            if not pre_tourney and cfg.get('show_prizes', False):
                 prize_str = f'<span class="prize">${s["prize"]}</span>' if s['prize'] > 0 else '-'
             participant_started = any(pk.get('started', False) for pk in s['picks'])
             place_cell = '—' if not participant_started else place_display
             rows += f"""
             <tr>
-                <td class="{place_class}" style="font-size:{'1.4em' if is_official and s['place'] in ('1st','2nd') else '1em'}">{place_cell}</td>
+                <td class="{place_class}" style="font-size:{'1.4em' if is_official and base_place in ('1st','2nd') else '1em'}">{place_cell}</td>
                 <td>{s['name']}</td>
                 <td>{' &middot; '.join(best_picks)}</td>
                 <td>{prize_str}</td>
@@ -1129,7 +1421,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
         <div class="card full-width">
             <h2>Pool Standings</h2>
             <table class="standings-table">
-                <thead><tr><th>Place</th><th>Name</th><th>Top Picks (Position) <span style="font-weight:normal;color:#7a9a7a;font-size:0.8em">· bold = solo pick</span></th><th>Prize</th></tr></thead>
+                <thead><tr><th>Place</th><th>Name</th><th>Top Picks (Position) <span style="font-weight:normal;color:var(--c-muted);font-size:0.8em">· bold = solo pick</span></th><th>Prize</th></tr></thead>
                 <tbody>{rows}</tbody>
             </table>
         </div>"""
@@ -1143,15 +1435,36 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
     # Leaderboard section
     leaderboard_html = ""
     if players and not pre_tourney:
-        rows = ""
-        for i, p in enumerate(players):
+        # Collect picked players, then sort: scoring players by position, not-yet-started by tee time, cut last
+        picked_players = []
+        for p in players:
             name_lower = p['name'].lower()
             pickers = []
             for pk, names in picked_by.items():
                 if name_lower in pk or pk in name_lower:
                     pickers.extend(names)
-            if not pickers:
-                continue
+            if pickers:
+                picked_players.append((p, pickers))
+
+        current_round = tournament.get('current_round', 1)
+
+        def lb_sort_key(item):
+            p = item[0]
+            if p.get('cut'):
+                return (2, 0, '')
+            thru = p.get('thru', '-')
+            started_today = thru != '-'
+            has_prior = p.get('rounds_complete', 0) > 0
+            if not started_today and not has_prior and current_round == 1:
+                # R1, truly not started: group below scorers, sorted by tee time
+                return (1, 0, p.get('tee_time_sort', '') or 'ZZ:ZZ')
+            # Has prior score or already playing: sort by overall position
+            return (0, p['position'], '')
+
+        picked_players.sort(key=lb_sort_key)
+
+        rows = ""
+        for p, pickers in picked_players:
 
             badge = f'<span class="picked-badge">{", ".join(pickers)}</span>'
             is_cut = p.get('cut', False)
@@ -1162,8 +1475,10 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
                 score_class = 'score-even'
                 total_today = f'{p["score"]} / CUT'
             else:
-                thru_val = p.get('thru', '-')
-                pos_display = str(p['position']) if p.get('rounds_complete', 0) > 0 or thru_val != '-' else 'N/A'
+                thru = p.get('thru', '-')
+                started_today = thru != '-'          # played holes in current round
+                has_prior = p.get('rounds_complete', 0) > 0  # completed a prior round
+                pos_display = str(p['position']) if (started_today or has_prior) else '—'
                 row_class = 'picked'
                 score_str = str(p['score'])
                 if score_str.startswith('-'):
@@ -1174,13 +1489,16 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
                     score_class = 'score-over'
                 else:
                     score_class = 'score-even'
-                thru = p.get('thru', '-')
                 thru_str = f'({thru})' if thru not in ('-', 'F') else ('' if thru == '-' else '(F)')
-                if thru == '-':
-                    total_today = f'{p["score"]}' if p["score"] not in ('', None) else '—'
+                tee = p.get('tee_time', '')
+                if tee and not started_today:
+                    tee_time_cell = tee
+                if not started_today:
                     score_class = 'score-even'
-                    if p.get('tee_time'):
-                        tee_time_cell = p['tee_time']
+                    if current_round == 1:
+                        total_today = '—'
+                    else:
+                        total_today = f'{p["score"]} / —'
                 else:
                     total_today = f'{p["score"]} / {p.get("today", "-")}{thru_str}'
 
@@ -1189,7 +1507,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
                 <td>{pos_display}</td>
                 <td>{p['name']}{badge}</td>
                 <td class="{score_class}">{total_today}</td>
-                <td style="color:#8abf8a;font-size:0.85em;white-space:nowrap">{tee_time_cell}</td>
+                <td style="color:var(--c-tint);font-size:0.85em;white-space:nowrap">{tee_time_cell}</td>
             </tr>"""
         rnd_label = f'Round {tournament.get("current_round", 1)}'
         leaderboard_html = f"""
@@ -1260,22 +1578,24 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
             for pd in pick_data:
                 owgr_str = f"#{pd['owgr']}" if pd['owgr_found'] else 'NR'
                 if tournament_live:
-                    # Show tournament position as main badge
-                    if pd['tourn_pos_num'] == 998:
+                    is_cut_pick = pd['tourn_pos_num'] == 999
+                    not_started = pd['tourn_pos_num'] == 998
+                    if not_started:
                         badge_color = '#555555'
+                    elif is_cut_pick:
+                        badge_color = '#c0392b'
                     elif pd['tourn_pos_num'] <= 20:
-                        badge_color = '#4a9e5c'
+                        badge_color = 'var(--c-accent)'
                     elif pd['tourn_pos_num'] <= 40:
-                        badge_color = '#e8d44d'
-                    elif pd['tourn_pos_num'] == 999:
-                        badge_color = '#2a2a2a'
+                        badge_color = 'var(--c-gold)'
                     else:
                         badge_color = '#7a2020'
                     badge = f'<span class="owgr-rank" style="color:{badge_color};border-color:{badge_color}">{pd["tourn_pos"]}</span>'
+                    item_style = ' style="opacity:0.45"' if is_cut_pick else ''
                     pick_items += f"""
-                <div class="pick-item">
+                <div class="pick-item"{item_style}>
                     <span class="pick-golfer">{badge} {pd['name']}</span>
-                    <span class="pick-pos">{owgr_str}</span>
+                    <span class="pick-pos">{'CUT' if is_cut_pick else pd['tourn_pos']}</span>
                 </div>"""
                 else:
                     # Pre-tournament: show OWGR rank as main badge
@@ -1295,7 +1615,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
             c_data = career_lookup.get(p['name'].lower())
             career_badge = ''
             if c_data and c_data['winnings'] > 0:
-                career_badge = f'<span style="font-size:0.75em;color:#e8d44d;font-weight:700;margin-left:8px">Career: ${c_data["winnings"]}</span>'
+                career_badge = f'<span style="font-size:0.75em;color:var(--c-gold);font-weight:700;margin-left:8px">Career: ${c_data["winnings"]}</span>'
             cards += f"""
             <div class="participant-card">
                 <div class="participant-name">{p['name']}{career_badge}</div>
@@ -1314,14 +1634,14 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
         top = career[0]['name']
         crow = ''
         for c in career:
-            highlight = ' style="background:rgba(232,212,77,0.07)"' if c['name'] == top else ''
+            highlight = ' style="background:rgba(var(--c-gold-rgb),0.07)"' if c['name'] == top else ''
             crow += f"""
             <tr{highlight}>
                 <td>{c['name']}</td>
                 <td style="text-align:center">{c['tournaments']}</td>
                 <td style="text-align:center">{'🥇 ' * c['wins'] if c['wins'] else '—'}</td>
                 <td style="text-align:center">{'🥈 ' * c['seconds'] if c['seconds'] else '—'}</td>
-                <td style="text-align:right;color:#e8d44d;font-weight:700">${c['winnings']}</td>
+                <td style="text-align:right;color:var(--c-gold);font-weight:700">${c['winnings']}</td>
             </tr>"""
         career_body = f"""
                 <table class="standings-table">
@@ -1345,6 +1665,9 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
 <head>
     <title>Kapelke Golf Pool - {cfg['name']}</title>
     <style>{STYLES}</style>
+    <style>:root {{
+{theme_css}
+    }}</style>
 </head>
 <body>
     <div class="container">
@@ -1457,11 +1780,11 @@ def _autocomplete_js(player_names):
     return f"""
 <style>
 .ac-wrap {{ position: relative; }}
-.ac-dropdown {{ position: absolute; top: 100%; left: 0; right: 0; background: #1a3320;
-  border: 1px solid #4a9e5c; border-top: none; border-radius: 0 0 6px 6px;
+.ac-dropdown {{ position: absolute; top: 100%; left: 0; right: 0; background: var(--c-bg2);
+  border: 1px solid var(--c-accent); border-top: none; border-radius: 0 0 6px 6px;
   z-index: 200; display: none; max-height: 220px; overflow-y: auto; }}
-.ac-item {{ padding: 8px 12px; cursor: pointer; color: #e8efe8; font-size: 0.9em; }}
-.ac-item:hover, .ac-item.active {{ background: #2d5a38; }}
+.ac-item {{ padding: 8px 12px; cursor: pointer; color: var(--c-text); font-size: 0.9em; }}
+.ac-item:hover, .ac-item.active {{ background: var(--c-border); }}
 </style>
 <script>
 const GOLFERS = {names_json};
@@ -1650,13 +1973,13 @@ class GolfPoolHandler(BaseHTTPRequestHandler):
 <title>Admin Login — Kapelke Golf Pool</title>
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family:'Georgia','Times New Roman',serif; background:#0c1a0c; color:#e8efe8; display:flex; align-items:center; justify-content:center; min-height:100vh; }}
-.box {{ background:#1a3320; border:1px solid #2d5a38; border-radius:12px; padding:36px 32px; width:100%; max-width:360px; }}
-h1 {{ color:#e8d44d; font-size:1.4em; margin-bottom:24px; text-align:center; }}
-label {{ display:block; font-size:0.9em; color:#8abf8a; margin-bottom:6px; }}
-input[type=password] {{ width:100%; padding:10px 12px; background:#0f2615; border:1px solid #2d5a38; border-radius:6px; color:#e8efe8; font-size:1em; margin-bottom:20px; }}
-input[type=password]:focus {{ outline:none; border-color:#4a9e5c; }}
-button {{ width:100%; padding:12px; background:#2d7a3e; color:#e8efe8; border:none; border-radius:6px; font-size:1em; cursor:pointer; font-family:inherit; }}
+body {{ font-family:'Georgia','Times New Roman',serif; background:var(--c-bg); color:var(--c-text); display:flex; align-items:center; justify-content:center; min-height:100vh; }}
+.box {{ background:var(--c-bg2); border:1px solid var(--c-border); border-radius:12px; padding:36px 32px; width:100%; max-width:360px; }}
+h1 {{ color:var(--c-gold); font-size:1.4em; margin-bottom:24px; text-align:center; }}
+label {{ display:block; font-size:0.9em; color:var(--c-tint); margin-bottom:6px; }}
+input[type=password] {{ width:100%; padding:10px 12px; background:var(--c-bg-dark); border:1px solid var(--c-border); border-radius:6px; color:var(--c-text); font-size:1em; margin-bottom:20px; }}
+input[type=password]:focus {{ outline:none; border-color:var(--c-accent); }}
+button {{ width:100%; padding:12px; background:#2d7a3e; color:var(--c-text); border:none; border-radius:6px; font-size:1em; cursor:pointer; font-family:inherit; }}
 button:hover {{ background:#3a9e50; }}
 </style></head>
 <body><div class="box">
@@ -1694,6 +2017,16 @@ button:hover {{ background:#3a9e50; }}
         elif self.path == '/admin/fetch-next':
             if not self._require_admin(): return
             self._handle_fetch_next()
+        elif self.path == '/admin/picklab/advisor' or self.path.startswith('/admin/picklab/advisor?'):
+            if not self._require_admin(): return
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            tid = params.get('tid', [None])[0]
+            self._send_html(picklab.generate_picklab_advisor_html(tid=tid))
+        elif self.path == '/admin/picklab' or self.path.startswith('/admin/picklab?'):
+            if not self._require_admin(): return
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            participant = params.get('participant', [None])[0]
+            self._send_html(picklab.generate_picklab_html(participant=participant))
         elif self.path.startswith('/admin'):
             if not self._require_admin(): return
             self._serve_admin(self.path)
@@ -1740,6 +2073,18 @@ button:hover {{ background:#3a9e50; }}
         elif self.path == '/admin/delete-participant':
             if not self._require_admin(): return
             self._handle_delete_participant_history()
+        elif self.path == '/admin/picklab/advisor/create-tournament':
+            if not self._require_admin(): return
+            self._handle_picklab_create_tournament()
+        elif self.path == '/admin/picklab/advisor/add-player':
+            if not self._require_admin(): return
+            self._handle_picklab_add_player()
+        elif self.path == '/admin/picklab/advisor/delete-player':
+            if not self._require_admin(): return
+            self._handle_picklab_delete_player()
+        elif self.path == '/admin/picklab/recompute':
+            if not self._require_admin(): return
+            self._handle_picklab_recompute()
         else:
             self.send_response(404)
             self.end_headers()
@@ -1971,23 +2316,23 @@ button:hover {{ background:#3a9e50; }}
         # Parse query string for status messages
         msg = ''
         if '?success=updated' in path:
-            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Tournament settings updated.</div>'
+            msg = '<div style="background:#1a4a1a;border:1px solid var(--c-accent);border-radius:8px;padding:12px 16px;margin-bottom:20px;color:var(--c-tint)">✓ Tournament settings updated.</div>'
         elif '?success=stored' in path:
-            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Results stored to career history. Picks unchanged.</div>'
+            msg = '<div style="background:#1a4a1a;border:1px solid var(--c-accent);border-radius:8px;padding:12px 16px;margin-bottom:20px;color:var(--c-tint)">✓ Results stored to career history. Picks unchanged.</div>'
         elif '?success=reset' in path:
-            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Tournament archived and reset. Picks cleared.</div>'
+            msg = '<div style="background:#1a4a1a;border:1px solid var(--c-accent);border-radius:8px;padding:12px 16px;margin-bottom:20px;color:var(--c-tint)">✓ Tournament archived and reset. Picks cleared.</div>'
         elif '?success=resetonly' in path:
-            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Picks cleared. History unchanged.</div>'
+            msg = '<div style="background:#1a4a1a;border:1px solid var(--c-accent);border-radius:8px;padding:12px 16px;margin-bottom:20px;color:var(--c-tint)">✓ Picks cleared. History unchanged.</div>'
         elif '?success=locked' in path:
-            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Entries locked.</div>'
+            msg = '<div style="background:#1a4a1a;border:1px solid var(--c-accent);border-radius:8px;padding:12px 16px;margin-bottom:20px;color:var(--c-tint)">✓ Entries locked.</div>'
         elif '?success=unlocked' in path:
-            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Entries unlocked.</div>'
+            msg = '<div style="background:#1a4a1a;border:1px solid var(--c-accent);border-radius:8px;padding:12px 16px;margin-bottom:20px;color:var(--c-tint)">✓ Entries unlocked.</div>'
         elif '?error=badpass' in path:
             msg = '<div style="background:#4a1a1a;border:1px solid #9e4a4a;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#bf8a8a">✗ Incorrect password.</div>'
         elif '?success=renamed' in path:
-            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Participant renamed.</div>'
+            msg = '<div style="background:#1a4a1a;border:1px solid var(--c-accent);border-radius:8px;padding:12px 16px;margin-bottom:20px;color:var(--c-tint)">✓ Participant renamed.</div>'
         elif '?success=removed' in path:
-            msg = '<div style="background:#1a4a1a;border:1px solid #4a9e5c;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#8abf8a">✓ Participant removed from history.</div>'
+            msg = '<div style="background:#1a4a1a;border:1px solid var(--c-accent);border-radius:8px;padding:12px 16px;margin-bottom:20px;color:var(--c-tint)">✓ Participant removed from history.</div>'
 
         # Build participant management section
         all_names = sorted(_all_historical_names())
@@ -2000,12 +2345,12 @@ button:hover {{ background:#3a9e50; }}
         for name in all_names:
             participant_rows += f"""
         <tr>
-          <td style="padding:8px 10px;color:#e8efe8">{name}</td>
+          <td style="padding:8px 10px;color:var(--c-text)">{name}</td>
           <td style="padding:8px 10px">
             <form method="POST" action="/admin/rename-participant" style="display:inline-flex;gap:6px;align-items:center">
               <input type="hidden" name="old_name" value="{name}">
-              <input type="text" name="new_name" placeholder="New name" style="width:140px;padding:5px 8px;background:#0f2615;border:1px solid #2d5a38;border-radius:4px;color:#e8efe8;font-size:0.85em">
-              <button type="submit" style="padding:5px 10px;background:#2d5a38;color:#e8efe8;border:none;border-radius:4px;cursor:pointer;font-size:0.85em">Rename</button>
+              <input type="text" name="new_name" placeholder="New name" style="width:140px;padding:5px 8px;background:var(--c-bg-dark);border:1px solid var(--c-border);border-radius:4px;color:var(--c-text);font-size:0.85em">
+              <button type="submit" style="padding:5px 10px;background:var(--c-border);color:var(--c-text);border:none;border-radius:4px;cursor:pointer;font-size:0.85em">Rename</button>
             </form>
           </td>
           <td style="padding:8px 10px">
@@ -2032,15 +2377,15 @@ button:hover {{ background:#3a9e50; }}
             rows = ''
             for r in results:
                 picks_str = ', '.join(r.get('picks', [])) or '—'
-                rows += f'<tr><td style="padding:6px 10px;color:#e8d44d;white-space:nowrap">{r["place"]}</td><td style="padding:6px 10px;color:#e8efe8">{r["name"]}</td><td style="padding:6px 10px;color:#8abf8a;font-size:0.85em">{picks_str}</td></tr>'
+                rows += f'<tr><td style="padding:6px 10px;color:var(--c-gold);white-space:nowrap">{r["place"]}</td><td style="padding:6px 10px;color:var(--c-text)">{r["name"]}</td><td style="padding:6px 10px;color:var(--c-tint);font-size:0.85em">{picks_str}</td></tr>'
             archive_html += f"""
         <div style="margin-bottom:20px">
-          <div style="font-weight:700;color:#e8d44d;margin-bottom:8px">{t['tournament']} — {t.get('dates','')} {t.get('year','')}</div>
+          <div style="font-weight:700;color:var(--c-gold);margin-bottom:8px">{t['tournament']} — {t.get('dates','')} {t.get('year','')}</div>
           <table style="width:100%;border-collapse:collapse;font-size:0.88em">
             <thead><tr>
-              <th style="padding:6px 10px;color:#8abf8a;text-align:left;border-bottom:1px solid #2d5a38">Place</th>
-              <th style="padding:6px 10px;color:#8abf8a;text-align:left;border-bottom:1px solid #2d5a38">Name</th>
-              <th style="padding:6px 10px;color:#8abf8a;text-align:left;border-bottom:1px solid #2d5a38">Picks</th>
+              <th style="padding:6px 10px;color:var(--c-tint);text-align:left;border-bottom:1px solid var(--c-border)">Place</th>
+              <th style="padding:6px 10px;color:var(--c-tint);text-align:left;border-bottom:1px solid var(--c-border)">Name</th>
+              <th style="padding:6px 10px;color:var(--c-tint);text-align:left;border-bottom:1px solid var(--c-border)">Picks</th>
             </tr></thead>
             <tbody>{rows}</tbody>
           </table>
@@ -2052,22 +2397,12 @@ button:hover {{ background:#3a9e50; }}
           {archive_html if archive_html else '<div style="color:#6b7280;font-size:0.9em">No archived picks yet. Picks are saved when you Archive &amp; Reset at end of tournament.</div>'}
         </div>"""
 
-        counts = cfg.get('counts_for_career', True)
-        if counts:
-            eot_block = """
+        eot_block = """
         <div style="font-size:0.85em;color:#6b7280;margin-bottom:14px;line-height:1.5">
-            Saves final standings to career history and clears all picks.
+            Saves results to history and clears all picks for the next tournament.
         </div>
         <form method="POST" action="/admin/reset">
             <button type="submit" class="btn btn-red">Archive &amp; Reset</button>
-        </form>"""
-        else:
-            eot_block = """
-        <div style="font-size:0.85em;color:#6b7280;margin-bottom:14px;line-height:1.5">
-            Clears all picks and unlocks entries for the next tournament.
-        </div>
-        <form method="POST" action="/admin/reset-only">
-            <button type="submit" class="btn btn-red">Reset Picks</button>
         </form>"""
 
         html = f"""<!DOCTYPE html>
@@ -2076,28 +2411,28 @@ button:hover {{ background:#3a9e50; }}
     <title>Admin — Kapelke Golf Pool</title>
     <style>
         * {{ margin:0; padding:0; box-sizing:border-box; }}
-        body {{ font-family:'Georgia','Times New Roman',serif; background:#0c1a0c; color:#e8efe8; padding:30px 20px; }}
+        body {{ font-family:'Georgia','Times New Roman',serif; background:var(--c-bg); color:var(--c-text); padding:30px 20px; }}
         .container {{ max-width:680px; margin:0 auto; }}
-        h1 {{ color:#e8d44d; font-size:1.8em; margin-bottom:6px; }}
-        .back {{ color:#4a9e5c; font-size:0.9em; text-decoration:none; display:inline-block; margin-bottom:24px; }}
+        h1 {{ color:var(--c-gold); font-size:1.8em; margin-bottom:6px; }}
+        .back {{ color:var(--c-accent); font-size:0.9em; text-decoration:none; display:inline-block; margin-bottom:24px; }}
         .back:hover {{ text-decoration:underline; }}
-        .card {{ background:#1a3320; border:1px solid #2d5a38; border-radius:12px; padding:24px; margin-bottom:24px; }}
-        .card h2 {{ color:#e8d44d; font-size:1.1em; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid #4a9e5c; }}
-        label {{ display:block; font-size:0.9em; color:#8abf8a; margin-bottom:5px; margin-top:14px; }}
+        .card {{ background:var(--c-bg2); border:1px solid var(--c-border); border-radius:12px; padding:24px; margin-bottom:24px; }}
+        .card h2 {{ color:var(--c-gold); font-size:1.1em; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid var(--c-accent); }}
+        label {{ display:block; font-size:0.9em; color:var(--c-tint); margin-bottom:5px; margin-top:14px; }}
         label:first-of-type {{ margin-top:0; }}
         input[type=text], input[type=number], input[type=password] {{
-            width:100%; padding:10px 12px; background:#0f2615; border:1px solid #2d5a38;
-            border-radius:8px; color:#e8efe8; font-family:'Georgia',serif; font-size:0.95em;
+            width:100%; padding:10px 12px; background:var(--c-bg-dark); border:1px solid var(--c-border);
+            border-radius:8px; color:var(--c-text); font-family:'Georgia',serif; font-size:0.95em;
         }}
-        input:focus {{ outline:none; border-color:#4a9e5c; }}
+        input:focus {{ outline:none; border-color:var(--c-accent); }}
         .btn {{ display:inline-block; padding:10px 22px; border:none; border-radius:8px;
                 font-family:'Georgia',serif; font-size:0.95em; font-weight:700; cursor:pointer; }}
-        .btn-green {{ background:#4a9e5c; color:#0c1a0c; margin-top:18px; }}
-        .btn-green:hover {{ background:#5cb86e; }}
-        .btn-red {{ background:#7a2020; color:#e8efe8; margin-top:18px; }}
+        .btn-green {{ background:var(--c-accent); color:var(--c-bg); margin-top:18px; }}
+        .btn-green:hover {{ background:var(--c-accent2); }}
+        .btn-red {{ background:#7a2020; color:var(--c-text); margin-top:18px; }}
         .btn-red:hover {{ background:#9e3030; }}
         .status-row {{ display:flex; justify-content:space-between; padding:8px 0;
-                       border-bottom:1px solid #2d5a38; font-size:0.9em; }}
+                       border-bottom:1px solid var(--c-border); font-size:0.9em; }}
         .status-row:last-child {{ border:none; }}
         .warn {{ background:#2a1a0a; border:1px solid #7a4a1a; border-radius:8px;
                  padding:12px 16px; font-size:0.85em; color:#c8a06a; margin-bottom:14px; line-height:1.5; }}
@@ -2107,6 +2442,7 @@ button:hover {{ background:#3a9e50; }}
 <div class="container">
     <h1>⚙ Admin</h1>
     <a href="/" class="back">← Back to Dashboard</a>
+    &nbsp;&nbsp;<a href="/admin/picklab" style="color:#c8a06a;font-size:0.9em;text-decoration:none">⚗ Pick Lab</a>
     {msg}
 
     <!-- Tournament Settings -->
@@ -2136,6 +2472,10 @@ button:hover {{ background:#3a9e50; }}
                 Show medals 🥇🥈 (enable only when tournament is fully complete)
             </label>
             <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:10px">
+                <input type="checkbox" name="show_prizes" value="1" {'checked' if cfg.get('show_prizes') else ''} style="width:auto;margin:0">
+                Show prize amounts in standings (enable after tournament ends)
+            </label>
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:10px">
                 <input type="checkbox" name="counts_for_career" value="1" {'checked' if cfg.get('counts_for_career', True) else ''} style="width:auto;margin:0">
                 Counts toward career earnings (uncheck for non-counting tournaments)
             </label>
@@ -2149,7 +2489,7 @@ button:hover {{ background:#3a9e50; }}
     <div class="card">
         <h2>Tournament Status</h2>
         <div class="status-row"><span>Participants</span><span>{len(participants)}</span></div>
-        <div class="status-row"><span>Prize Pool</span><span style="color:#e8d44d">${total_pot}</span></div>
+        <div class="status-row"><span>Prize Pool</span><span style="color:var(--c-gold)">${total_pot}</span></div>
         <div class="status-row">
             <span>Entry Status</span>
             <span>{'&#x1F512; Locked' if locked else '&#x1F7E2; Open'}</span>
@@ -2178,7 +2518,7 @@ function loadNextTournament() {{
     var status = document.getElementById('fetch-status');
     status.style.display = 'block';
     status.textContent = 'Fetching next tournament...';
-    status.style.color = '#8abf8a';
+    status.style.color = 'var(--c-tint)';
     fetch('/admin/fetch-next')
         .then(function(r) {{ return r.json(); }})
         .then(function(data) {{
@@ -2192,14 +2532,14 @@ function loadNextTournament() {{
             document.getElementById('f-dates').value   = t.dates;
             document.getElementById('f-course').value  = t.course;
             document.getElementById('f-pga-id').value  = t.pga_tour_id;
-            status.style.color = '#8abf8a';
+            status.style.color = 'var(--c-tint)';
             status.textContent = '✓ Loaded: ' + t.name + ' — ' + t.course + ' (' + t.dates + '). Review and save.';
 
             if (data.participant_count > 0) {{
                 var warn = document.createElement('div');
                 warn.id = 'picks-warning';
                 warn.style.cssText = 'margin-top:12px;padding:12px 14px;background:#2a1a0a;border:1px solid #7a4a1a;border-radius:8px;font-size:0.85em;color:#c8a06a;line-height:1.6';
-                warn.innerHTML = '&#9888; <b>' + data.participant_count + ' participant' + (data.participant_count > 1 ? 's' : '') + '</b> from the previous tournament are still loaded. Scroll down to <a href="#eot" onclick="document.getElementById(\'eot-section\').scrollIntoView({{behavior:\'smooth\'}});return false;" style="color:#e8d44d;font-weight:700">End of Tournament</a> to reset before opening entries.';
+                warn.innerHTML = '&#9888; <b>' + data.participant_count + ' participant' + (data.participant_count > 1 ? 's' : '') + '</b> from the previous tournament are still loaded. Scroll down to <a href="#eot" onclick="document.getElementById(\'eot-section\').scrollIntoView({{behavior:\'smooth\'}});return false;" style="color:var(--c-gold);font-weight:700">End of Tournament</a> to reset before opening entries.';
                 var existing = document.getElementById('picks-warning');
                 if (existing) existing.remove();
                 document.getElementById('fetch-status').after(warn);
@@ -2232,6 +2572,7 @@ function loadNextTournament() {{
         cfg['pga_tour_id']  = params.get('pga_tour_id',  [cfg['pga_tour_id']])[0].strip()
         cfg['entry_fee']    = int(params.get('entry_fee', [cfg['entry_fee']])[0])
         cfg['show_medals']       = '1' in params.get('show_medals', [])
+        cfg['show_prizes']       = '1' in params.get('show_prizes', [])
         cfg['counts_for_career'] = '1' in params.get('counts_for_career', [])
         new_pw = params.get('new_password', [''])[0].strip()
         if new_pw:
@@ -2273,25 +2614,28 @@ function loadNextTournament() {{
 
     def _handle_admin_reset(self):
         cfg = load_tournament()
-        # Archive current standings (only if counts_for_career)
-        if cfg.get('counts_for_career', True):
-            try:
-                picks_data = load_picks()
-                tournament, players = fetch_leaderboard()
-                standings = calculate_standings(picks_data.get('participants', []), players)
-                picks_by_name = {p['name']: p['picks'] for p in picks_data.get('participants', [])}
-                history = load_history()
-                history.append({
-                    'tournament': cfg['name'],
-                    'dates':      cfg['dates'],
-                    'year':       datetime.now().year,
-                    'results':    [{'name': s['name'], 'place': s['place'], 'prize': s['prize'],
-                                    'picks': picks_by_name.get(s['name'], [])}
-                                   for s in standings],
-                })
-                save_history(history)
-            except Exception as e:
-                print(f"  Archive skipped (leaderboard unavailable): {e}")
+        picks_data = load_picks()
+        picks_by_name = {p['name']: p['picks'] for p in picks_data.get('participants', [])}
+        # Try to fetch live standings; fall back to picks-only if leaderboard unavailable
+        try:
+            tournament, players = fetch_leaderboard()
+            standings = calculate_standings(picks_data.get('participants', []), players)
+            results = [{'name': s['name'], 'place': s['place'], 'prize': s['prize'],
+                        'picks': picks_by_name.get(s['name'], [])}
+                       for s in standings]
+        except Exception as e:
+            print(f"  Leaderboard unavailable, archiving picks only: {e}")
+            results = [{'name': p['name'], 'place': '—', 'prize': 0,
+                        'picks': p['picks']}
+                       for p in picks_data.get('participants', [])]
+        history = load_history()
+        history.append({
+            'tournament': cfg['name'],
+            'dates':      cfg['dates'],
+            'year':       datetime.now().year,
+            'results':    results,
+        })
+        save_history(history)
         # Reset picks
         save_picks({'entry_fee': cfg['entry_fee'], 'locked': False, 'participants': []})
         self.send_response(303)
@@ -2354,6 +2698,64 @@ function loadNextTournament() {{
         html = generate_entry_html(message=message, error=error, player_names=player_names, past_names=past_names)
         self._send_html(html)
 
+    def _handle_picklab_create_tournament(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        params = urllib.parse.parse_qs(self.rfile.read(content_length).decode('utf-8'))
+        name    = params.get('name', [''])[0].strip()
+        course  = params.get('course', [''])[0].strip()
+        ttype   = params.get('tournament_type', ['other'])[0]
+        try:
+            pool_size = int(params.get('pool_size', ['8'])[0])
+        except ValueError:
+            pool_size = 8
+        if not name:
+            self._send_html(picklab.generate_picklab_advisor_html(msg='Tournament name is required.', error=True))
+            return
+        tid = picklab.create_advisor_tournament(name, course, ttype, pool_size)
+        self.send_response(303)
+        self.send_header('Location', f'/admin/picklab/advisor?tid={tid}')
+        self.end_headers()
+
+    def _handle_picklab_add_player(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        params = urllib.parse.parse_qs(self.rfile.read(content_length).decode('utf-8'))
+        tid         = params.get('tid', [''])[0]
+        player_name = params.get('player_name', [''])[0].strip()
+        try:
+            win_prob   = float(params.get('win_prob', ['0'])[0])
+            course_fit = int(params.get('course_fit', ['50'])[0])
+            form_score = int(params.get('form_score', ['50'])[0])
+        except (ValueError, TypeError):
+            self.send_response(303)
+            self.send_header('Location', f'/admin/picklab/advisor?tid={tid}')
+            self.end_headers()
+            return
+        if player_name and tid:
+            picklab.add_advisor_player(tid, player_name, win_prob, course_fit, form_score)
+        self.send_response(303)
+        self.send_header('Location', f'/admin/picklab/advisor?tid={tid}')
+        self.end_headers()
+
+    def _handle_picklab_delete_player(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        params = urllib.parse.parse_qs(self.rfile.read(content_length).decode('utf-8'))
+        pid = params.get('pid', [''])[0]
+        tid = params.get('tid', [''])[0]
+        if pid:
+            try:
+                picklab.delete_advisor_player(int(pid))
+            except (ValueError, TypeError):
+                pass
+        self.send_response(303)
+        self.send_header('Location', f'/admin/picklab/advisor?tid={tid}')
+        self.end_headers()
+
+    def _handle_picklab_recompute(self):
+        picklab.compute_tendency_scores()
+        self.send_response(303)
+        self.send_header('Location', '/admin/picklab')
+        self.end_headers()
+
     def _send_html(self, html):
         body = html.encode('utf-8')
         self.send_response(200)
@@ -2378,6 +2780,7 @@ function loadNextTournament() {{
 def main():
     port = int(os.environ.get('PORT', 8051))
     host = '0.0.0.0' if os.environ.get('RENDER') else 'localhost'
+    picklab.init_db()
     cfg = load_tournament()
     print("=" * 50)
     print("  Kapelke Golf Pool Dashboard")

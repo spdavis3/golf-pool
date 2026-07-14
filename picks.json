@@ -1,94 +1,17 @@
 {
   "entry_fee": 25,
+  "locked": false,
   "participants": [
-    {
-      "name": "Al",
-      "picks": [
-        "Scottie Scheffler",
-        "Xander Schauffele",
-        "Chris Gotterup",
-        "Hideki Matsuyama",
-        "Sam Burns",
-        "Rory McIlroy"
-      ]
-    },
     {
       "name": "Sam",
       "picks": [
-        "Scottie Scheffler",
-        "Collin Morikawa",
-        "Hideki Matsuyama",
-        "Xander Schauffele",
-        "Tommy Fleetwood",
-        "Jake Knapp"
-      ]
-    },
-    {
-      "name": "Pedro",
-      "picks": [
-        "Scottie Scheffler",
         "Rory McIlroy",
-        "Sepp Straka",
-        "Justin Rose",
+        "Tommy Fleetwood",
+        "Matt Fitzpatrick",
+        "Robert MacIntyre",
         "Min Woo Lee",
-        "Marco Penge"
-      ]
-    },
-    {
-      "name": "Randy",
-      "picks": [
-        "Scottie Scheffler",
-        "Hideki Matsuyama",
-        "Xander Schauffele",
-        "Patrick Cantlay",
-        "Matt Fitzpatrick",
-        "Harris English"
-      ]
-    },
-    {
-      "name": "Mikee",
-      "picks": [
-        "Matt Fitzpatrick",
-        "Tommy Fleetwood",
-        "Viktor Hovland",
-        "Sahith Theegala",
-        "Kurt Kitayama",
-        "Scottie Scheffler"
-      ]
-    },
-    {
-      "name": "Bob",
-      "picks": [
-        "Collin Morikawa",
-        "Hideki Matsuyama",
-        "Akshay Bhatia",
-        "Ludvig \u00c5berg",
-        "Scottie Scheffler",
-        "Rory McIlroy"
-      ]
-    },
-    {
-      "name": "Chuck",
-      "picks": [
-        "Ryo Hisatsune",
-        "Tommy Fleetwood",
-        "Akshay Bhatia",
-        "Scottie Scheffler",
-        "Sam Burns",
-        "Chris Gotterup"
-      ]
-    },
-    {
-      "name": "Lingvall",
-      "picks": [
-        "Rory McIlroy",
-        "Scottie Scheffler",
-        "Hideki Matsuyama",
-        "Viktor Hovland",
-        "Cameron Young",
-        "Xander Schauffele"
+        "Tom Kim"
       ]
     }
-  ],
-  "locked": true
+  ]
 }
