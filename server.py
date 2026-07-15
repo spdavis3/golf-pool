@@ -1874,6 +1874,12 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
 
 def _autocomplete_js(player_names):
     names_json = json.dumps(sorted(player_names, key=lambda n: n.split()[-1].lower()) if player_names else [])
+    # Rank map lets the paste-fill matcher break surname collisions toward the better-ranked golfer.
+    ranks = {}
+    if player_names:
+        for n in player_names:
+            ranks[n] = get_owgr_rank(n)[0]
+    ranks_json = json.dumps(ranks)
     return f"""
 <style>
 .ac-wrap {{ position: relative; }}
@@ -1885,6 +1891,7 @@ def _autocomplete_js(player_names):
 </style>
 <script>
 const GOLFERS = {names_json};
+const GOLFER_RANKS = {ranks_json};
 function setupAC(input) {{
   const wrap = input.parentElement;
   wrap.classList.add('ac-wrap');
@@ -1917,6 +1924,148 @@ function setupAC(input) {{
   input.addEventListener('blur', () => setTimeout(() => {{ dd.style.display = 'none'; }}, 150));
 }}
 document.querySelectorAll('.golfer-input').forEach(setupAC);
+
+// ── Paste-to-fill: match a pasted email/text against GOLFERS, no fixed format ──
+(function() {{
+  const box = document.getElementById('paste-box');
+  const btn = document.getElementById('fill-picks-btn');
+  const status = document.getElementById('fill-status');
+  if (!box || !btn) return; // only present on the enter form
+
+  function norm(s) {{
+    return (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
+      .replace(/[^a-z\\s]/g, ' ').replace(/\\s+/g, ' ').trim();
+  }}
+  const ROSTER = GOLFERS.map(n => {{
+    const parts = norm(n).split(' ').filter(Boolean);
+    return {{ name: n, full: norm(n), first: parts[0] || '', last: parts[parts.length - 1] || '',
+             rank: (GOLFER_RANKS[n] || 999) }};
+  }}).sort((a, b) => a.rank - b.rank); // better-ranked first, so surname-tie .filter()[0] picks the likely golfer
+
+  // Match one candidate token to a roster golfer. Returns {{name, score, ambiguous}} or null.
+  function matchGolfer(tok) {{
+    const t = norm(tok);
+    if (!t || t.length < 2) return null;
+    const words = t.split(' ').filter(Boolean);
+    const lastWord = words[words.length - 1];
+    let m = ROSTER.find(r => r.full === t);
+    if (m) return {{ name: m.name, score: 100 }};
+    const lastEq = ROSTER.filter(r => r.last === lastWord);
+    if (lastEq.length === 1) return {{ name: lastEq[0].name, score: words.length > 1 ? 92 : 82 }};
+    if (lastEq.length > 1) {{
+      if (words.length > 1) {{
+        const fw = words[0];
+        const byFirst = lastEq.filter(r => r.first === fw || r.first.startsWith(fw) || (r.first[0] || '') === fw[0]);
+        if (byFirst.length === 1) return {{ name: byFirst[0].name, score: 88 }};
+      }}
+      return {{ name: lastEq[0].name, score: 40, ambiguous: true, alts: lastEq.map(r => r.name) }};
+    }}
+    m = ROSTER.find(r => r.full.includes(t) || t.includes(r.full));
+    if (m) return {{ name: m.name, score: 70 }};
+    if (lastWord.length >= 4) {{
+      const pref = ROSTER.filter(r => r.last.startsWith(lastWord) || lastWord.startsWith(r.last));
+      if (pref.length === 1) return {{ name: pref[0].name, score: 55 }};
+    }}
+    // last resort: a single word inside the token that is a unique surname (rescues trailing junk)
+    for (const w of words) {{
+      if (w.length < 4) continue;
+      const le = ROSTER.filter(r => r.last === w);
+      if (le.length === 1) return {{ name: le[0].name, score: 60 }};
+    }}
+    return null;
+  }}
+
+  // Split into candidate tokens, keeping line index so we can find the picks cluster.
+  function tokenize(text) {{
+    const out = [];
+    text.split(/\\n|\\r/).forEach((line, li) => {{
+      line.split(/[,;\\/|]| and | & |\\t/i).forEach(raw => {{
+        const cleaned = raw.replace(/^\\s*(\\d+[\\.\\):]|[-*•])\\s*/, '').trim();
+        if (cleaned) out.push({{ raw: cleaned, line: li }});
+      }});
+    }});
+    return out;
+  }}
+
+  function parse(text) {{
+    const toks = tokenize(text);
+    const hits = toks.map(t => ({{ ...t, m: matchGolfer(t.raw) }})).filter(t => t.m);
+    // Cluster rule: if one line yields >=5 matches, trust that line in order (the comma case).
+    const byLine = {{}};
+    hits.forEach(h => {{ (byLine[h.line] = byLine[h.line] || []).push(h); }});
+    let chosen = null, best = 0;
+    for (const li in byLine) {{ if (byLine[li].length > best) {{ best = byLine[li].length; chosen = byLine[li]; }} }}
+    let ordered = (best >= 5) ? chosen : hits; // else whole-document scan (one-per-line etc.)
+    // Dedupe by golfer, preserve first-seen order, cap at 6.
+    const seen = {{}};
+    const picks = [];
+    ordered.forEach(h => {{
+      if (seen[h.m.name]) return;
+      seen[h.m.name] = true;
+      picks.push(h.m);
+    }});
+    return picks.slice(0, 6);
+  }}
+
+  btn.addEventListener('click', () => {{
+    const inputs = Array.from(document.querySelectorAll('.golfer-input'));
+    const picks = parse(box.value);
+    if (!picks.length) {{
+      status.style.color = '#d9534f';
+      status.textContent = 'No golfers recognized — check the paste or enter manually.';
+      return;
+    }}
+    document.querySelectorAll('.pick-alts').forEach(el => el.remove()); // clear chips from a prior fill
+    inputs.forEach((inp, i) => {{
+      const p = picks[i];
+      if (!p) return;
+      inp.value = p.name;
+      const flag = p.ambiguous || p.score < 60;
+      inp.style.borderColor = flag ? '#e0a800' : '';
+      inp.title = flag ? 'Low-confidence — tap an alternative below, or just type to change it' : '';
+      // Surname collision → offer the other same-surname golfers as one-click chips.
+      if (p.alts && p.alts.length > 1) {{
+        const row = document.createElement('div');
+        row.className = 'pick-alts';
+        row.style.cssText = 'margin-top:6px; font-size:.8em; color:#e0a800; display:flex; flex-wrap:wrap; gap:6px; align-items:center;';
+        const lbl = document.createElement('span');
+        lbl.textContent = 'Same surname — tap to switch:';
+        row.appendChild(lbl);
+        p.alts.forEach(name => {{
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.textContent = name;
+          const paint = () => {{
+            const on = (inp.value === name);
+            b.style.cssText = 'border:1px solid #e0a800; border-radius:12px; padding:2px 10px; font-size:1em; cursor:pointer; background:' +
+              (on ? '#e0a800' : 'transparent') + '; color:' + (on ? '#000' : '#e0a800') + ';';
+          }};
+          paint();
+          b.addEventListener('click', () => {{
+            inp.value = name;
+            inp.style.borderColor = '';
+            inp.title = '';
+            row.querySelectorAll('button').forEach(x => {{ x.style.background = 'transparent'; x.style.color = '#e0a800'; }});
+            b.style.background = '#e0a800'; b.style.color = '#000';
+          }});
+          row.appendChild(b);
+        }});
+        inp.parentElement.appendChild(row);
+      }}
+    }});
+    const flagged = picks.filter(p => p.ambiguous || p.score < 60).length;
+    if (picks.length < 6) {{
+      status.style.color = '#e0a800';
+      status.textContent = 'Filled ' + picks.length + ' of 6 — complete the rest manually.';
+    }} else if (flagged) {{
+      status.style.color = '#e0a800';
+      status.textContent = 'Filled 6 of 6 — ' + flagged + ' flagged (⚠ outlined), please verify.';
+    }} else {{
+      status.style.color = '#28a745';
+      status.textContent = 'Filled 6 of 6 — review and submit.';
+    }}
+  }});
+}})();
 </script>"""
 
 
@@ -1968,6 +2117,14 @@ def generate_entry_html(message='', error=False, player_names=None, past_names=N
                     <div class="form-group">
                         <label>Your Name</label>
                         <input type="text" name="name" placeholder="Select or type your name" list="participants" required>
+                    </div>
+                    <div class="form-group" style="border:1px dashed var(--c-border); border-radius:8px; padding:12px; background:var(--c-bg2);">
+                        <label style="display:flex; align-items:center; gap:8px;">Paste picks <span style="font-weight:400; color:var(--c-muted, #888); font-size:.85em;">(optional — email or text, any order)</span></label>
+                        <textarea id="paste-box" rows="4" placeholder="Paste the whole email or text — e.g. &quot;Scheffler, Schauffele, McIlroy, Cam Young, Fitzpatrick, Rose&quot;. Junk lines are ignored." style="width:100%; box-sizing:border-box; background:var(--c-bg2); border:1px solid var(--c-border); color:var(--c-text); border-radius:6px; padding:8px; font-family:inherit; font-size:.9em; resize:vertical;"></textarea>
+                        <div style="display:flex; align-items:center; gap:12px; margin-top:8px;">
+                            <button type="button" id="fill-picks-btn" style="background:var(--c-accent); color:#fff; border:none; border-radius:6px; padding:8px 16px; font-weight:600; cursor:pointer;">Fill picks &darr;</button>
+                            <span id="fill-status" style="font-size:.85em;"></span>
+                        </div>
                     </div>
                     {pick_fields}
                     <button type="submit" class="submit-btn">Submit Picks</button>
