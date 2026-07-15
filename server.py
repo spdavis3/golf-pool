@@ -74,12 +74,18 @@ def career_standings():
         for r in t.get('results', []):
             n = r['name']
             if n not in totals:
-                totals[n] = {'name': n, 'tournaments': 0, 'wins': 0, 'seconds': 0, 'winnings': 0}
+                totals[n] = {'name': n, 'tournaments': 0, 'wins': 0, 'seconds': 0,
+                             'winnings': 0, 'tie_wins': 0, 'tie_seconds': 0}
             totals[n]['tournaments'] += 1
             totals[n]['winnings']    += r.get('prize', 0)
-            place = r['place'].lstrip('T-')  # 'T-1st' (tie) still counts
-            if place == '1st': totals[n]['wins']    += 1
-            if place == '2nd': totals[n]['seconds'] += 1
+            is_tie = r['place'].upper().startswith('T')  # 'T-1st'/'T1' → shared finish
+            place = r['place'].lstrip('T-')  # 'T-1st' (tie) still counts as a 1st
+            if place == '1st':
+                totals[n]['wins'] += 1
+                if is_tie: totals[n]['tie_wins'] += 1
+            if place == '2nd':
+                totals[n]['seconds'] += 1
+                if is_tie: totals[n]['tie_seconds'] += 1
     return sorted(totals.values(), key=lambda x: (-x['winnings'], x['name'].lower()))
 PGA_TOUR_API_URL  = 'https://orchestrator.pgatour.com/graphql'
 PGA_TOUR_API_KEY  = 'da2-gsrx5bibzbb4njvhl7t37wqyl4'
@@ -1729,6 +1735,13 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
     career = career or []
     if career:
         top = career[0]['name']
+        # Solo finishes show a plain medal; tied finishes get the 'T-' prefix (matches live standings).
+        def _medals(emoji, total, ties):
+            if not total:
+                return '—'
+            solo = total - ties
+            return ('%s ' % emoji) * solo + ('T-%s ' % emoji) * ties
+        any_ties = any(c.get('tie_wins') or c.get('tie_seconds') for c in career)
         crow = ''
         for c in career:
             highlight = ' style="background:rgba(var(--c-gold-rgb),0.07)"' if c['name'] == top else ''
@@ -1736,10 +1749,11 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
             <tr{highlight}>
                 <td>{c['name']}</td>
                 <td style="text-align:center">{c['tournaments']}</td>
-                <td style="text-align:center">{'🥇 ' * c['wins'] if c['wins'] else '—'}</td>
-                <td style="text-align:center">{'🥈 ' * c['seconds'] if c['seconds'] else '—'}</td>
+                <td style="text-align:center">{_medals('🥇', c['wins'], c.get('tie_wins', 0))}</td>
+                <td style="text-align:center">{_medals('🥈', c['seconds'], c.get('tie_seconds', 0))}</td>
                 <td style="text-align:right;color:var(--c-gold);font-weight:700">${c['winnings']}</td>
             </tr>"""
+        legend = '<div style="font-size:0.8em;color:var(--c-muted,#888);margin-top:8px">T- = tied finish (shared placing — a tie for 1st means no 2nd that tournament)</div>' if any_ties else ''
         career_body = f"""
                 <table class="standings-table">
                     <thead><tr>
@@ -1748,7 +1762,7 @@ def generate_dashboard_html(tournament, players, picks_data, standings, career=N
                         <th style="text-align:right">Total Winnings</th>
                     </tr></thead>
                     <tbody>{crow}</tbody>
-                </table>"""
+                </table>{legend}"""
     else:
         career_body = '<div class="no-data">No tournament history yet — career winnings will appear here after the first archived tournament.</div>'
     career_html = f"""
