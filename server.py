@@ -328,7 +328,7 @@ def _fetch_core_tee_times(event_id, competitor_ids, round_num):
                     et = dt.astimezone(_EASTERN)
                     h = et.hour % 12 or 12
                     ampm = 'AM' if et.hour < 12 else 'PM'
-                    return cid, (f'{h}:{et.minute:02d} {ampm}', f'{et.hour:02d}:{et.minute:02d}')
+                    return cid, (f'{h}:{et.minute:02d} {ampm} EST', f'{et.hour:02d}:{et.minute:02d}')
         except Exception:
             pass
         return cid, ('', '')
@@ -348,7 +348,7 @@ def _parse_espn_tee_time(s):
     try:
         h = hour % 12 or 12
         ampm = 'AM' if hour < 12 else 'PM'
-        return f'{h}:{minute:02d} {ampm}', f'{hour:02d}:{minute:02d}'
+        return f'{h}:{minute:02d} {ampm} EST', f'{hour:02d}:{minute:02d}'
     except Exception:
         return '', ''
 
